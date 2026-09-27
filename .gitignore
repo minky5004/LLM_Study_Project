@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+.idea/
+checkpoints/
+CLAUDE.md
+.claude/
+.claude-*/
+.mcp.json
