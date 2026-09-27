@@ -1,0 +1,21 @@
+[project]
+name = "llm-study"
+version = "0.1.0"
+description = "작은 언어모델을 밑바닥부터 직접 구현하며 공부하는 프로젝트"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "numpy>=2.5.3",
+    "torch>=2.14",
+]
+
+[tool.uv]
+package = false
+
+# PyPI 의 Windows torch 는 CPU 전용 — GPU 판은 PyTorch 인덱스에서
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
