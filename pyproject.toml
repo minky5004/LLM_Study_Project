@@ -1,21 +1,55 @@
+# ─────────────────────────────────────────────────────────────
+# pyproject.toml — 이 프로젝트의 "설정서"
+#
+# Python 프로젝트의 표준 설정 파일. 옛날의 requirements.txt 역할(쓰는 라이브러리 목록)에
+# 더해 프로젝트 이름 · 필요한 Python 버전 · 라이브러리를 어디서 받을지까지 한 파일에 담는다.
+#
+# uv 가 이 파일을 읽고 일을 한다:
+#   uv sync   → 여기 적힌 대로 .venv(가상환경)를 만들고 라이브러리를 설치
+#   uv add X  → 라이브러리 X 를 설치하고 아래 dependencies 에 자동으로 한 줄 추가
+# 실제로 설치된 "정확한 버전"은 uv 가 uv.lock 에 따로 기록한다 (이 파일은 사람이 쓰는 쪽,
+# uv.lock 은 uv 가 자동으로 쓰는 쪽 — uv.lock 은 직접 고치지 않는다).
+# ─────────────────────────────────────────────────────────────
+
+# [project] — 프로젝트 기본 정보 (Python 표준 규격 · uv 말고 다른 도구도 읽는 부분)
 [project]
+# 프로젝트 이름. 패키지로 배포할 게 아니라 사실상 이름표 역할만 한다
 name = "llm-study"
+# 프로젝트 버전. 배포 안 하므로 의미는 거의 없지만 규격상 필수 항목
 version = "0.1.0"
 description = "작은 언어모델을 밑바닥부터 직접 구현하며 공부하는 프로젝트"
+# 이 프로젝트가 돌아가는 Python 버전 범위: 3.13.x 만 허용
+# (<3.14 로 막아 둔 이유: 새 Python 이 나오면 torch 지원이 늦게 따라오는 경우가 있어서)
 requires-python = ">=3.13,<3.14"
+# 이 프로젝트가 쓰는 외부 라이브러리 목록. ">=" 는 "이 버전 이상이면 OK" 라는 뜻
 dependencies = [
+    # 숫자 배열 계산 라이브러리. 직접 쓰진 않지만, 없으면 torch 가 import 될 때마다
+    # "Failed to initialize NumPy" 경고를 띄워서 넣었다
     "numpy>=2.5.3",
+    # PyTorch — 텐서(다차원 배열) 계산 + 자동 미분 + 신경망 부품. 이 프로젝트의 핵심
     "torch>=2.14",
 ]
 
+# [tool.uv] — 여기부터는 uv 전용 설정 (다른 도구는 무시하는 부분)
 [tool.uv]
+# "이건 남에게 배포할 패키지가 아니라 그냥 코드 모음이다" 라는 표시.
+# false 로 두면 uv 가 이 프로젝트 자체를 패키지로 빌드·설치하려 하지 않는다
 package = false
 
-# PyPI 의 Windows torch 는 CPU 전용 — GPU 판은 PyTorch 인덱스에서
+# [tool.uv.sources] — 특정 라이브러리를 "어디서" 받을지 지정
+# 왜 필요한가: 기본 저장소(PyPI)에 올라간 Windows 용 torch 는 CPU 전용판이다.
+# 그냥 설치하면 에러 없이 CPU 판이 깔려서, GPU(RTX 3060)를 못 쓰는데도 모르고 지나가게 된다.
+# 그래서 torch 만큼은 아래에 정의한 PyTorch 공식 서버에서 받으라고 못박는다
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }
 
+# [[tool.uv.index]] — 라이브러리를 받아올 "추가 저장소" 정의
 [[tool.uv.index]]
+# 위 [tool.uv.sources] 에서 이 이름으로 가리킨다
 name = "pytorch-cu130"
+# PyTorch 공식 서버 중 CUDA 13.0 용 빌드가 모인 곳 (cu130 = CUDA 13.0)
+# CUDA = NVIDIA GPU 로 계산하게 해 주는 기술. 설치된 그래픽 드라이버(595)가 13.0 을 지원한다
 url = "https://download.pytorch.org/whl/cu130"
+# true = "sources 에서 명시적으로 지목한 라이브러리(torch)만 여기서 받아라".
+# 이게 없으면 numpy 같은 다른 라이브러리까지 이 서버에서 찾으려 해서 꼬일 수 있다
 explicit = true

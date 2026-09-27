@@ -1,1 +1,3 @@
+# uv 가 이 프로젝트에서 쓸 Python 버전 (uv python pin 3.13 으로 생성)
+# uv run / uv sync 가 이 파일을 보고 3.13 을 골라 쓴다. PC 에 없으면 uv 가 알아서 받아 온다
 3.13
