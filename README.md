@@ -23,4 +23,11 @@
 
 ## 환경
 
-로컬 Python (GPU 없으면 CPU로 아주 작은 모델/데이터로 진행).
+[uv](https://docs.astral.sh/uv/) 필요 · Python 3.13 · torch 2.14 CUDA 13.0 판
+
+```bash
+uv sync                    # Python · 가상환경 · 의존성 한 번에
+uv run python -c "import torch; print(torch.cuda.is_available())"   # → True
+```
+
+PyPI 의 Windows torch 는 CPU 전용 — `pyproject.toml` 에서 PyTorch 인덱스 지정 · GPU 없는 PC 는 같은 설치로 CPU 실행
