@@ -29,3 +29,27 @@ vocab_size = len(chars)
 if __name__ == "__main__":
     print(vocab_size)                # 기대: 69
     print(repr("".join(chars[:12]))) # 기대: 줄바꿈 · 공백 · ':' 가 맨 앞 (개행도 엄연한 토큰)
+
+
+# ---- 조각 2: stoi · itos 사전 (글자 <-> 번호 표 두 장) ----
+
+# chars 는 리스트라 "몇 번째 글자냐" 는 알지만, 글자로 번호를 찾으려면 처음부터 훑어야 한다.
+# 딕셔너리로 만들어 두면 글자를 넣자마자 번호가 바로 나온다.
+#
+# stoi (string to int): 글자 -> 번호.  예) {'\n': 0, ' ': 1, ':': 2, '가': 3, ...}  · encode 가 쓴다
+#   enumerate(chars) 는 chars 의 글자마다 (번호, 글자) 쌍을 0번부터 붙여서 하나씩 꺼내준다.
+#   예) enumerate(['녕', '세']) -> (0, '녕'), (1, '세')
+#   {키: 값 for 변수 in 반복할것} 은 for 로 돌며 딕셔너리를 한 줄로 만드는 문법이다.
+#   for 뒤 변수 i, ch 는 enumerate 쌍의 순서 (번호, 글자) 그대로 받는다. 키 = 글자(ch) · 값 = 번호(i)
+stoi = {ch: i for i, ch in enumerate(chars)}
+
+# itos (int to string): 번호 -> 글자.  예) {0: '\n', 1: ' ', 2: ':', 3: '가', ...}  · decode 가 쓴다
+#   stoi 와 같은 enumerate 쌍에서 키와 값 자리만 맞바꾸면 된다.
+itos = {i: ch for i, ch in enumerate(chars)}
+
+# 두 표는 서로의 거울이다 — 표 크기는 vocab_size 와 같아야 하고,
+# 어떤 글자든 itos[stoi[글자]] 로 갔다 오면 제자리로 돌아와야 한다.
+if __name__ == "__main__":
+    print(len(stoi), len(itos))                # 기대: 69 69 (vocab_size 와 같다)
+    print(stoi["\n"], stoi[" "], stoi[":"])    # 기대: 0 1 2
+    print(itos[stoi["가"]])                    # 기대: 가 (갔다 오면 제자리)
