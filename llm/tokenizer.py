@@ -53,3 +53,32 @@ if __name__ == "__main__":
     print(len(stoi), len(itos))                # 기대: 69 69 (vocab_size 와 같다)
     print(stoi["\n"], stoi[" "], stoi[":"])    # 기대: 0 1 2
     print(itos[stoi["가"]])                    # 기대: 가 (갔다 오면 제자리)
+
+
+# ---- 조각 3: encode · decode (표 두 장으로 텍스트 <-> 번호 목록) ----
+
+def encode(s):
+    """문자열 -> 번호 리스트.  예) "안녕" -> [40, 15]
+
+    shape: 길이 L 인 문자열이 길이 L 인 리스트가 된다 (글자 하나 = 번호 하나라 길이가 그대로).
+    나중에 이 리스트를 torch.tensor 로 감싸면 모델 입력(shape: (L,))이 된다.
+    """
+    # 글자를 하나씩 꺼내(for c in s) stoi 표에서 번호를 찾아 리스트로 모은다.
+    # 리스트 컴프리헨션 [식 for 변수 in 반복할것] — 딕셔너리판({키: 값 for ...})과 같은 틀이다
+    return [stoi[c] for c in s]
+
+
+def decode(ids):
+    """번호 리스트 -> 문자열.  예) [40, 15] -> "안녕"  (encode 의 정반대)"""
+    # 번호를 하나씩 꺼내(for i in ids) itos 표에서 글자를 찾는다. 여기까지는 글자 리스트(['안', '녕'])
+    chars_back = [itos[i] for i in ids]
+    # 글자 리스트를 구분자 없이 이어 붙여 문자열 하나로 만든다.
+    # "구분자".join(리스트) 꼴 — 구분자 자리에 빈 문자열을 넣으면 사이에 아무것도 안 끼고 붙는다
+    return "".join(chars_back)
+
+
+# 갔다 오면 제자리여야 한다 — decode(encode(s)) == s 가 토크나이저가 맞는지 보는 가장 간단한 시험
+if __name__ == "__main__":
+    print(encode("안녕"))                    # 기대: [40, 15]
+    print(decode(encode("안녕")))            # 기대: 안녕
+    print(decode(encode(text)) == text)      # 기대: True (train.txt 65572자 전체도 왕복)
