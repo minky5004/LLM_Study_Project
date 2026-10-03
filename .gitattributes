@@ -1,0 +1,2 @@
+# 줄바꿈 통일 — Windows(CRLF) 와 다른 환경(LF) 섞임 방지
+* text=auto eol=lf
