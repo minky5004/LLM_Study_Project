@@ -1,7 +1,7 @@
 """트랜스포머 아키텍처: 임베딩 -> attention -> FFN -> 조립.
 
 GPT-2식으로 먼저 완성하고, 돌아가면 부품을 하나씩 현대식으로 교체한다 (4단계 문서 참고).
-지금은 조각 2까지: 토큰 임베딩 + 위치 임베딩.
+지금은 조각 3까지: 토큰 임베딩 + 위치 임베딩 + attention 의 Q/K/V.
 """
 
 import torch
@@ -60,6 +60,48 @@ class GPT(nn.Module):
         return x
 
 
+# ---- 조각 3: Q / K / V (한 글자를 질문 · 열쇠 · 값 세 벡터로) ----
+
+class CausalSelfAttention(nn.Module):
+    """attention 부품. 지금은 조각 3 이라 Q / K / V 를 만들어 돌려주는 데까지만 한다.
+
+    Q (질문): 이 글자가 앞 글자들 중에서 무엇을 찾고 있는지
+    K (열쇠): 이 글자가 다른 글자의 질문에 "나는 이런 글자야" 하고 내미는 표시
+    V (값):   이 글자가 누군가에게 참고당할 때 건네줄 정보
+    셋 다 같은 글자 벡터 x 에서 만들지만, 변환 기계(nn.Linear)가 셋으로 따로라서 결과가 서로 다르다.
+    점수 계산 · 마스킹 · softmax(조각 4) 는 아직 없다.
+    """
+
+    def __init__(self, config: ModelConfig):
+        super().__init__()  # nn.Module 을 쓰는 클래스의 첫 줄 (GPT 와 같은 이유)
+
+        # nn.Linear(들어오는 칸 수, 나가는 칸 수): 벡터를 받아 새 벡터로 바꿔 주는 기계. 안에 학습으로 고쳐지는 숫자 표(가중치)가 있다.
+        # 지금은 모양을 그대로 유지한다 — 입력 (B, T, n_embd) 이 출력도 (B, T, n_embd). (칸을 쪼개는 건 조각 5 multi-head 에서)
+        # 질문을 만드는 기계. 들어오는 것이 임베딩을 거친 벡터 x 라서 들어오는 칸 · 나가는 칸 모두 n_embd 다 (vocab_size 는 번호 → 벡터 표의 줄 수일 뿐).
+        self.q_proj = nn.Linear(config.n_embd, config.n_embd)
+
+        # 열쇠를 만드는 기계. 질문 기계와 크기는 같지만 숫자 표가 따로라서 학습하면 서로 다른 일을 하게 된다.
+        self.k_proj = nn.Linear(config.n_embd, config.n_embd)
+
+        # 값을 만드는 기계. 마찬가지로 숫자 표가 따로다.
+        self.v_proj = nn.Linear(config.n_embd, config.n_embd)
+
+    def forward(self, x):
+        """x: 위치까지 섞인 글자 벡터. shape (B, T, n_embd).
+        반환: (q, k, v) 세 텐서. 각각 shape (B, T, n_embd). (조각 4 에서 이어서 점수 계산에 쓴다)
+        """
+        # Linear 는 입력의 맨 뒤 칸(n_embd)에만 적용된다 — 글자마다 따로, 같은 변환을 한다.
+        # 질문: q_proj 에 x 를 넣는다. shape: (B, T, n_embd)
+        q = self.q_proj(x)
+
+        # 열쇠 (위 q 와 같은 모양으로 k_proj 에 x 를 넣는다)
+        k = self.k_proj(x)
+
+        # 값: v_proj 에 x 를 넣는다. shape: (B, T, n_embd)
+        v = self.v_proj(x)
+        return q, k, v
+
+
 # 직접 실행했을 때만 확인용 출력
 if __name__ == "__main__":
     config = ModelConfig()
@@ -74,3 +116,10 @@ if __name__ == "__main__":
     print(out.shape)   # 기대: torch.Size([2, 5, 128]) (위치를 더해도 모양은 그대로)
     # 기대: 25216 = 토큰 표 8832 (69 x 128) + 위치 표 16384 (128 x 128)
     print(sum(p.numel() for p in model.parameters()))
+
+    # 조각 3 확인: 임베딩 결과 out 을 attention 부품에 넣어 Q / K / V 를 만든다
+    attn = CausalSelfAttention(config)
+    q, k, v = attn(out)
+    print(q.shape, k.shape, v.shape)   # 기대: 셋 다 torch.Size([2, 5, 128]) (모양은 그대로)
+    # 기대: 49536 = (128 x 128 가중치 + 128 편향) x 3
+    print(sum(p.numel() for p in attn.parameters()))
