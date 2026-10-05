@@ -61,6 +61,15 @@ class ModelConfig:
         # assert 조건, "메시지": 조건이 거짓이면 그 자리에서 메시지와 함께 에러를 내며 멈춘다.
         # % 는 나눈 "나머지" 를 구하는 연산자. 128 % 4 = 0 (딱 나뉨) · 128 % 3 = 2 (안 나뉨)
         assert self.n_embd % self.n_head == 0, "n_embd 는 n_head 로 나누어 떨어져야 한다"
+        # 결과: 128 % 4 = 0 → 통과 (n_head=3 이면 128 % 3 = 2 → AssertionError 로 멈춘다)
+
+# ---- ModelConfig 결과 (실행해서 확인한 값) ----
+# ModelConfig()
+#   → ModelConfig(vocab_size=69, block_size=128, n_embd=128, n_head=4, n_layer=4, dropout=0.1)
+# ModelConfig(n_layer=8)      ← 바꾼 값만 달라지고 나머지는 기본값 그대로
+#   → ModelConfig(vocab_size=69, block_size=128, n_embd=128, n_head=4, n_layer=8, dropout=0.1)
+# ModelConfig(n_head=3)       ← 128 % 3 = 2 라서 검사에 걸려 상자를 만들기 전에 멈춘다
+#   → AssertionError: n_embd 는 n_head 로 나누어 떨어져야 한다
 
 
 @dataclass
@@ -89,3 +98,11 @@ class TrainConfig:
     # 배치 하나로만 점수를 매기면 그 배치가 우연히 쉬웠는지 어려웠는지에 따라 들쭉날쭉하다 → 여러 번 평균 낸다.
     # 50 = 작은 모델에 무난한 값. 점검 한 번에 배치 50개를 계산한다.
     eval_iters: int = 50
+
+# ---- TrainConfig 결과 (실행해서 확인한 값) ----
+# TrainConfig()
+#   → TrainConfig(batch_size=32, learning_rate=0.0003, max_iters=3000, eval_interval=300, eval_iters=50)
+# TrainConfig(max_iters=5000, batch_size=16)      ← 바꾼 값만 달라진다
+#   → TrainConfig(batch_size=16, learning_rate=0.0003, max_iters=5000, eval_interval=300, eval_iters=50)
+# 3e-4 == 0.0003   → True                          ← 지수 표기와 소수 표기는 같은 수
+# 32 * 3000 = 96000 (학습하는 동안 훑는 데이터 조각 수) · 3000 // 300 = 10 (학습 중 점검 횟수)
