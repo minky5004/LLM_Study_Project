@@ -25,7 +25,7 @@ text = open(TRAIN_PATH, encoding="utf-8").read()
 chars = sorted(set(text))
 # 결과: 69개짜리 리스트 — 맨 앞부터 ['\n', ' ', ':', '가', '게', '고', ...] (줄바꿈 · 공백 · 기호가 먼저, 한글은 가나다순)
 
-# 글자 종류의 개수 = vocab_size. ModelConfig.vocab_size(지금 임시값 256)를 이 값으로 바꾸게 된다.
+# 글자 종류의 개수 = vocab_size. ModelConfig.vocab_size 도 같은 값(지금은 69 를 직접 적어 둠 — 5단계에서 이 값과 연결).
 vocab_size = len(chars)
 # 결과: 69
 
