@@ -1,7 +1,7 @@
 """트랜스포머 아키텍처: 임베딩 -> attention -> FFN -> 조립.
 
 GPT-2식으로 먼저 완성하고, 돌아가면 부품을 하나씩 현대식으로 교체한다 (4단계 문서 참고).
-지금은 조각 2까지: 토큰 임베딩 + 위치 임베딩 (몇 번째 글자인지 알려 주기).
+지금은 조각 3까지: 토큰 임베딩 + 위치 임베딩 (몇 번째 글자인지 알려 주기) + attention 의 Q/K/V.
 """
 
 import torch
@@ -77,6 +77,58 @@ class GPT(nn.Module):
         return x
 
 
+# ---- 조각 3: Q / K / V (글자 하나에서 질문 · 열쇠 · 값 세 줄 만들기) ----
+
+class CausalSelfAttention(nn.Module):
+    """attention 부품(앞 글자를 얼마나 참고할지 정하는 계산). 지금은 조각 3 이라 Q / K / V 를 만들어 돌려주는 데까지만 한다.
+
+    Q (질문): 이 글자가 앞 글자들 중에서 무엇을 찾고 있는지
+    K (열쇠): 이 글자가 남의 질문에 "나는 이런 글자야" 하고 내미는 표시
+    V (값):   이 글자가 참고당할 때 건네줄 내용
+    셋 다 같은 글자 줄 x 에서 만들지만, 바꿔 주는 기계(nn.Linear)가 셋으로 따로라서 결과가 서로 다르다.
+    점수 계산 · 마스킹 · softmax 는 조각 4 에서 붙인다.
+    """
+
+    def __init__(self, config: ModelConfig):
+        # nn.Module 을 물려받은 클래스의 첫 줄 (GPT 와 같은 이유 — 아래 기계들이 "부품 목록 장부" 에 적히게)
+        super().__init__()
+
+        # nn.Linear(들어오는 칸 수, 나가는 칸 수): 줄 하나를 받아 새 줄로 바꿔 주는 기계.
+        # 안에 가중치(칸마다 곱하는 숫자)와 편향(더하는 숫자)이 있고, 처음엔 아무 값이다가 학습으로 고쳐진다.
+        # 지금은 모양을 그대로 둔다: 입력 (B, T, n_embd) -> 출력 (B, T, n_embd). (칸을 쪼개는 건 조각 5 multi-head)
+
+        # 질문을 만드는 기계.
+        # 들어오는 것은 조각 1 · 2 를 거쳐 이미 줄이 된 x 라서 들어오는 칸 수가 n_embd 다 (vocab_size 는 "번호 -> 줄" 표의 줄 수일 뿐).
+        # 나가는 칸 수도 지금은 같은 n_embd 로 둔다 — 조각 5 에서 이 줄을 4갈래로 쪼갤 때 128 이 필요하다.
+        self.q_proj = nn.Linear(config.n_embd, config.n_embd)
+        # 결과: q_proj.weight.shape = torch.Size([128, 128]) (나가는 칸 x 들어오는 칸) · q_proj.bias.shape = torch.Size([128]) · 파라미터 16512 = 128 x 128 + 128
+
+        # 열쇠를 만드는 기계. 질문 기계와 크기는 같지만 새로 만든다.
+        # q_proj 를 다시 쓰면 가중치가 같아서 Q 와 K 가 똑같은 줄이 된다 (문서 3-3 ②).
+        self.k_proj = nn.Linear(config.n_embd, config.n_embd)
+
+        # 값을 만드는 기계. 숫자 표(가중치)가 따로라서 학습하면 질문 · 열쇠와 다른 일을 하게 된다.
+        self.v_proj = nn.Linear(config.n_embd, config.n_embd)
+
+    def forward(self, x):
+        """x: 조각 1 · 2 를 거친 글자 줄 묶음. shape (B, T, n_embd).
+        반환: (q, k, v) 세 텐서. 각각 shape (B, T, n_embd). (조각 4 에서 이어서 점수 계산에 쓴다)
+        """
+        # Linear 는 입력의 맨 뒤 칸(n_embd)에만 적용된다 — 글자마다 따로, 같은 기계로 바꾼다. 그래서 B 와 T 는 그대로 남는다.
+        # 질문: q_proj 에 x 를 넣는다. shape: (B, T, n_embd)
+        q = self.q_proj(x)
+
+        # 열쇠: k_proj 에 x 를 넣는다. shape: (B, T, n_embd)
+        k = self.k_proj(x)
+
+        # 값: v_proj 에 x 를 넣는다. 셋 다 같은 x 를 넣는다 — 기계(가중치)가 달라서 결과가 달라진다 (문서 3-1 ④).
+        v = self.v_proj(x)
+        # 결과: x (2, 5, 128) -> q · k · v 모두 (2, 5, 128). 같은 x 인데 q == k, k == v 모두 False (기계가 따로라서 서로 다른 줄)
+
+        # 세 줄을 묶어서 돌려준다 (파이썬은 값 여러 개를 쉼표로 묶어 한 번에 돌려줄 수 있다).
+        return q, k, v
+
+
 # 직접 실행했을 때만 확인용 출력
 if __name__ == "__main__":
     config = ModelConfig()
@@ -94,7 +146,16 @@ if __name__ == "__main__":
     # 기대: 25216 = 글자 표 8832 (69 x 128) + 자리표 16384 (128 x 128)
     print(sum(p.numel() for p in model.parameters()))
 
+    # 조각 3 확인: 위치까지 섞은 out 을 attention 부품에 넣어 Q / K / V 를 만든다
+    attn = CausalSelfAttention(config)
+    q, k, v = attn(out)
+    print(q.shape, k.shape, v.shape)  # 기대: 셋 다 torch.Size([2, 5, 128]) (모양은 그대로)
+    # 기대: 49536 = (128 x 128 가중치 + 128 편향) x 3
+    print(sum(p.numel() for p in attn.parameters()))
+
 # ---- 직접 실행 결과 (uv run python -m llm.model) ----
 # torch.Size([2, 5])
 # torch.Size([2, 5, 128])
 # 25216
+# torch.Size([2, 5, 128]) torch.Size([2, 5, 128]) torch.Size([2, 5, 128])
+# 49536
