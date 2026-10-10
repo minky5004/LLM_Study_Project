@@ -1,7 +1,7 @@
 """트랜스포머 아키텍처: 임베딩 -> attention -> FFN -> 조립.
 
 GPT-2식으로 먼저 완성하고, 돌아가면 부품을 하나씩 현대식으로 교체한다 (4단계 문서 참고).
-지금은 조각 4까지: 토큰 임베딩 + 위치 임베딩 (몇 번째 글자인지 알려 주기) + attention (Q/K/V -> 점수 -> 마스킹 -> softmax -> V 섞기).
+지금은 조각 6까지: 토큰 임베딩 + 위치 임베딩 (몇 번째 글자인지 알려 주기) + multi-head attention + 블록 (FFN · 잔차 · LayerNorm).
 """
 
 import math
@@ -201,6 +201,77 @@ class CausalSelfAttention(nn.Module):
         return y
 
 
+# ---- 조각 6: FFN · 잔차 · LayerNorm 으로 블록 하나 완성 (문서 6-1 ~ 6-5) ----
+
+class FeedForward(nn.Module):
+    """FFN: 글자마다 따로 줄을 가공하는 작은 신경망. shape (B, T, n_embd) -> (B, T, n_embd).
+
+    attention 이 글자끼리 섞어 내용을 모아 온 뒤, 그 내용을 글자 하나 안에서 가공한다 (문서 6-1).
+    글자끼리는 섞지 않는다 — 첫 글자만 바꿔도 다른 글자의 결과는 그대로다.
+    모양은 Linear(펼치기) -> 활성화 함수 -> Linear(접기).
+    """
+
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+
+        # 가운데에서 줄을 넓게 펼쳤다가 원래 칸 수로 접는다. GPT-2 관례로 입력 칸 수(n_embd)의 몇 배를 쓴다 (문서 6-1 ④).
+        # 4 배로 펼친다 (128 -> 512). 4 배는 GPT-2 가 쓴 관례다. 512 를 직접 적지 않고 n_embd 에 곱해서 n_embd 를 바꿔도 같이 따라가게 한다.
+        hidden = 4 * config.n_embd
+        # 결과: n_embd=128 이면 hidden = 512 (n_embd=64 이면 256 · 256 이면 1024)
+
+        # 펼치는 기계: 들어오는 칸 n_embd -> 나가는 칸 hidden.  shape (B, T, n_embd) -> (B, T, hidden)
+        self.fc1 = nn.Linear(config.n_embd, hidden)
+        # 접는 기계: hidden -> n_embd. 입력과 같은 칸 수로 돌아와야 잔차에서 더할 수 있다 (문서 6-3 ④).
+        self.fc2 = nn.Linear(hidden, config.n_embd)
+        # 결과: FFN 파라미터 131712 = fc1 (128 x 512 + 512) + fc2 (512 x 128 + 128)
+
+    def forward(self, x):
+        # 펼친다. shape (B, T, n_embd) -> (B, T, hidden)
+        x = self.fc1(x)
+
+        # Linear 둘을 바로 이으면 Linear 하나와 같아진다. 사이에 음수는 0 으로 · 양수는 그대로 두는 함수를 끼워 합쳐지지 않게 한다 (문서 6-2).
+        # F.relu: 학습할 숫자가 없는 함수다. 칸마다 따로 적용된다.
+        x = F.relu(x)
+        # 결과: F.relu([-1.0, 2.0, -0.5, 3.0]) = [0.0, 2.0, 0.0, 3.0] (음수만 0 으로 · shape 는 그대로)
+
+        # 접는다. shape (B, T, hidden) -> (B, T, n_embd)
+        x = self.fc2(x)
+        return x
+
+
+class Block(nn.Module):
+    """트랜스포머 블록 하나: attention 과 FFN 을 LayerNorm · 잔차로 묶는다. shape (B, T, n_embd) -> (B, T, n_embd).
+
+    입력과 출력 모양이 같아서 이 블록을 그대로 여러 겹 쌓을 수 있다 (조각 7).
+    순서는 GPT-2 의 pre-norm: 부품 앞에서 줄을 맞추고(LayerNorm) -> 부품 -> 입력을 더한다 (문서 6-5).
+    """
+
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+
+        # LayerNorm: 글자마다 줄을 평균 0 · 퍼짐 1 근처로 맞춘다 (문서 6-4). 괄호에는 맞출 줄의 칸 수(맨 뒤 축)를 적는다.
+        # attention 앞 · FFN 앞에 따로 둔다 — 안에 학습되는 숫자(gamma · beta)가 각자 있어서 둘은 다른 층이다.
+        # 글자 하나의 줄이 n_embd 칸이라 두 곳 모두 n_embd 를 넣는다. 안에 칸마다 gamma · beta 가 있어 파라미터가 128 x 2 = 256 이다.
+        self.ln1 = nn.LayerNorm(config.n_embd)
+        self.attn = CausalSelfAttention(config)
+        self.ln2 = nn.LayerNorm(config.n_embd)
+        self.ffn = FeedForward(config)
+        # 결과: ln1 파라미터 256 · FFN 131712 · attention 66048 · ln2 256 -> 블록 하나 198272
+
+    def forward(self, x):
+        # 잔차 연결: 부품의 출력에 입력을 그대로 더한다 (문서 6-3). 부품은 "바꿀 만큼" 만 만들면 된다.
+        # 더하는 길에는 LayerNorm 이 없어서 입력의 원래 정보가 그대로 흐른다.
+        # x + 부품(LayerNorm(x)) 가 한 묶음이고 attention 으로 한 번 · FFN 으로 한 번 한다 (문서 6-5).
+        # 더하는 쪽 x 는 LayerNorm 을 안 거친 입력 그대로다. 더하려면 모양이 같아야 해서 (B, T, n_embd) + (B, T, n_embd).
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        # 결과: 블록 출력 shape = torch.Size([2, 5, 128]) — 입력과 같은 모양
+        #       attention 의 o_proj · FFN 의 fc2 를 0 으로 만들면 블록이 입력을 그대로 돌려준다 (allclose True — 잔차의 증거)
+        #       마지막 글자만 바꿔도 앞 4글자의 출력은 그대로 True (블록 전체에서도 마스킹이 지켜진다)
+        #       ModelConfig(n_embd=64, n_head=2) · (n_embd=256, n_head=8) 도 같은 코드로 모양이 맞게 돈다
+        return x
+
+
 # 직접 실행했을 때만 확인용 출력
 if __name__ == "__main__":
     config = ModelConfig()
@@ -232,6 +303,25 @@ if __name__ == "__main__":
     print(torch.allclose(y[:, :-1], y2[:, :-1]))  # 기대: True
     print(torch.allclose(y[:, -1], y2[:, -1]))  # 기대: False (마지막 글자 자신은 바뀐다)
 
+    # 조각 6 확인: 블록 하나. 입력과 같은 모양이어야 쌓을 수 있다
+    block = Block(config)
+    z = block(out)
+    print(z.shape)  # 기대: torch.Size([2, 5, 128])
+    # 기대: 198272 = attention 66048 + LayerNorm 256 x 2 + FFN 131712 (128 x 512 + 512 + 512 x 128 + 128)
+    print(sum(p.numel() for p in block.parameters()))
+
+    # 잔차 확인: 부품의 마지막 Linear(o_proj · fc2)를 0 으로 만들면 부품 출력이 0 이라 블록은 입력을 그대로 돌려줘야 한다
+    zero_block = Block(config)
+    with torch.no_grad():
+        for lin in (zero_block.attn.o_proj, zero_block.ffn.fc2):
+            lin.weight.zero_()
+            lin.bias.zero_()
+    print(torch.allclose(zero_block(out), out))  # 기대: True
+
+    # FFN 확인: 글자끼리 섞지 않는다 — 마지막 글자만 바꿔도 앞 글자들의 결과는 그대로
+    ffn = FeedForward(config)
+    print(torch.allclose(ffn(out)[:, :-1], ffn(out2)[:, :-1]))  # 기대: True
+
 # ---- 직접 실행 결과 (uv run python -m llm.model) ----
 # torch.Size([2, 5])
 # torch.Size([2, 5, 128])
@@ -240,3 +330,7 @@ if __name__ == "__main__":
 # 66048
 # True
 # False
+# torch.Size([2, 5, 128])
+# 198272
+# True
+# True
