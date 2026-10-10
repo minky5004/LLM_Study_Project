@@ -1,11 +1,14 @@
 """트랜스포머 아키텍처: 임베딩 -> attention -> FFN -> 조립.
 
 GPT-2식으로 먼저 완성하고, 돌아가면 부품을 하나씩 현대식으로 교체한다 (4단계 문서 참고).
-지금은 조각 3까지: 토큰 임베딩 + 위치 임베딩 (몇 번째 글자인지 알려 주기) + attention 의 Q/K/V.
+지금은 조각 4까지: 토큰 임베딩 + 위치 임베딩 (몇 번째 글자인지 알려 주기) + attention (Q/K/V -> 점수 -> 마스킹 -> softmax -> V 섞기).
 """
+
+import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from llm.config import ModelConfig
 
@@ -80,13 +83,13 @@ class GPT(nn.Module):
 # ---- 조각 3: Q / K / V (글자 하나에서 질문 · 열쇠 · 값 세 줄 만들기) ----
 
 class CausalSelfAttention(nn.Module):
-    """attention 부품(앞 글자를 얼마나 참고할지 정하는 계산). 지금은 조각 3 이라 Q / K / V 를 만들어 돌려주는 데까지만 한다.
+    """attention 부품(앞 글자를 얼마나 참고할지 정하는 계산). 조각 3 의 Q / K / V 에 이어 점수 · 마스킹 · softmax · V 섞기까지 한다.
 
     Q (질문): 이 글자가 앞 글자들 중에서 무엇을 찾고 있는지
     K (열쇠): 이 글자가 남의 질문에 "나는 이런 글자야" 하고 내미는 표시
     V (값):   이 글자가 참고당할 때 건네줄 내용
     셋 다 같은 글자 줄 x 에서 만들지만, 바꿔 주는 기계(nn.Linear)가 셋으로 따로라서 결과가 서로 다르다.
-    점수 계산 · 마스킹 · softmax 는 조각 4 에서 붙인다.
+    읽을 것은 4단계 문서의 4-1 ~ 4-5. 글자 하나가 앞 글자를 몇 % 참고할지 정해 새 줄을 만든다 (multi-head 는 조각 5).
     """
 
     def __init__(self, config: ModelConfig):
@@ -112,21 +115,52 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x):
         """x: 조각 1 · 2 를 거친 글자 줄 묶음. shape (B, T, n_embd).
-        반환: (q, k, v) 세 텐서. 각각 shape (B, T, n_embd). (조각 4 에서 이어서 점수 계산에 쓴다)
+        반환: 앞 글자를 참고해 섞은 새 줄 묶음 y. shape (B, T, n_embd) — 입력과 같아서 뒤 부품이 그대로 이어받는다.
         """
-        # Linear 는 입력의 맨 뒤 칸(n_embd)에만 적용된다 — 글자마다 따로, 같은 기계로 바꾼다. 그래서 B 와 T 는 그대로 남는다.
-        # 질문: q_proj 에 x 를 넣는다. shape: (B, T, n_embd)
+        B, T, C = x.shape  # 문장 수 · 글자 수 · 줄의 칸 수
+
+        # 조각 3: 같은 x 에서 질문 · 열쇠 · 값을 만든다. 셋 다 shape (B, T, C).
         q = self.q_proj(x)
-
-        # 열쇠: k_proj 에 x 를 넣는다. shape: (B, T, n_embd)
         k = self.k_proj(x)
-
-        # 값: v_proj 에 x 를 넣는다. 셋 다 같은 x 를 넣는다 — 기계(가중치)가 달라서 결과가 달라진다 (문서 3-1 ④).
         v = self.v_proj(x)
-        # 결과: x (2, 5, 128) -> q · k · v 모두 (2, 5, 128). 같은 x 인데 q == k, k == v 모두 False (기계가 따로라서 서로 다른 줄)
 
-        # 세 줄을 묶어서 돌려준다 (파이썬은 값 여러 개를 쉼표로 묶어 한 번에 돌려줄 수 있다).
-        return q, k, v
+        # ---- ① 점수: 모든 글자 쌍의 질문-명찰이 얼마나 맞는지 (문서 4-1) ----
+        # 질문 q 와 명찰 k 를 곱해서 더한다. @ 는 표 전체에 한 번에 해 주는 "곱해서 더하기".
+        # @ 는 앞 표의 가로줄과 뒤 표의 세로줄을 짝짓는데 k 는 글자 하나가 가로줄이라, 뒤에서 두 번째 · 맨 뒤 축을 맞바꿔 뒤집는다.
+        # shape: (B, T, C) @ (B, C, T) -> (B, T, T). 줄 = 질문하는 글자, 칸 = 명찰을 내미는 글자
+        scores = q @ k.transpose(-2, -1)
+        # 결과: B=2, T=5 일 때 scores.shape = torch.Size([2, 5, 5]) (transpose 를 빼면 (B, T, C) @ (B, T, C) 라 모양이 안 맞아 에러)
+
+        # ---- 크기 줄이기: 칸이 많으면 점수가 커져 softmax 가 한 글자에 100% 를 몰아 주므로 sqrt(칸 수)로 나눈다 (문서 4-2) ----
+        scores = scores / math.sqrt(C)
+
+        # ---- ② 마스킹: 뒤 글자를 못 보게 가린다 (문서 4-3) ----
+        # 볼 수 있는 칸 = 1 · 못 보는 칸 = 0 인 지도. tril 은 왼쪽 아래 삼각형만 남기고 나머지를 0 으로 만든다.
+        # device=x.device: 지도를 입력과 같은 장치(GPU/CPU)에 만든다. 다르면 점수표와 계산이 안 된다.
+        mask = torch.tril(torch.ones(T, T, device=x.device))
+        # 지도가 0 인 칸을 마이너스 무한대로 덮는다. -inf 는 softmax 를 거치면 정확히 0% 가 된다 (문서 4-4 ③).
+        # 0 점으로 덮으면 "조금은 참고" 가 되어 0% 가 아니라서 -inf 를 쓴다.
+        scores = scores.masked_fill(mask == 0, float("-inf"))
+
+        # ---- ③ softmax: 줄마다 점수를 합 1 인 %로 (문서 4-4) ----
+        # dim=-1: 맨 뒤 축 방향 = 한 줄 안의 칸끼리 합을 1 로 맞춘다. 점수표의 한 줄이 한 글자의 참고 비율이라서다.
+        att = F.softmax(scores, dim=-1)
+        # att: (B, T, T) — 줄마다 합 1, 가려진 칸은 0
+        # 결과: att.shape = torch.Size([2, 5, 5]) · 줄 합은 전부 1.0000 · 첫 문장의 비율표 (torch.manual_seed(0) · x = randn(2, 5, 128))
+        #       [[1.00, 0.00, 0.00, 0.00, 0.00],   <- 첫 글자는 자기뿐이라 항상 100%
+        #        [0.50, 0.50, 0.00, 0.00, 0.00],
+        #        [0.39, 0.35, 0.26, 0.00, 0.00],
+        #        [0.27, 0.31, 0.18, 0.24, 0.00],
+        #        [0.25, 0.15, 0.24, 0.21, 0.15]]   <- 위쪽 삼각형은 마스킹으로 정확히 0
+
+        # ---- ④ 가져오기: % 대로 노트(v)를 섞어 새 줄을 만든다 (문서 4-5) ----
+        # 비율표와 노트를 곱해서 더한다. 앞에 비율표, 뒤에 노트. (B, T, T) @ (B, T, C) -> (B, T, C)
+        y = att @ v
+        # 결과: y.shape = torch.Size([2, 5, 128]) — 입력 x 와 같은 모양
+        #       F.scaled_dot_product_attention(q, k, v, is_causal=True) 와 torch.allclose 가 True (내장 함수와 같은 값)
+        #       마지막 글자만 바꿔도 앞 4글자의 결과는 그대로 True (뒤 글자를 못 본다는 증거)
+
+        return y
 
 
 # 직접 실행했을 때만 확인용 출력
@@ -148,10 +182,17 @@ if __name__ == "__main__":
 
     # 조각 3 확인: 위치까지 섞은 out 을 attention 부품에 넣어 Q / K / V 를 만든다
     attn = CausalSelfAttention(config)
-    q, k, v = attn(out)
-    print(q.shape, k.shape, v.shape)  # 기대: 셋 다 torch.Size([2, 5, 128]) (모양은 그대로)
-    # 기대: 49536 = (128 x 128 가중치 + 128 편향) x 3
+    y = attn(out)
+    print(y.shape)  # 기대: torch.Size([2, 5, 128]) (입력과 같은 모양)
+    # 기대: 49536 (조각 3 과 같다 — 점수 · softmax 는 학습할 숫자가 없다)
     print(sum(p.numel() for p in attn.parameters()))
+
+    # 마스킹 확인: 마지막 글자만 바꿔도 앞 글자들의 새 줄은 그대로여야 한다 (뒤 글자를 못 보니까)
+    out2 = out.clone()
+    out2[:, -1] += 1.0
+    y2 = attn(out2)
+    print(torch.allclose(y[:, :-1], y2[:, :-1]))  # 기대: True
+    print(torch.allclose(y[:, -1], y2[:, -1]))  # 기대: False (마지막 글자 자신은 바뀐다)
 
 # ---- 직접 실행 결과 (uv run python -m llm.model) ----
 # torch.Size([2, 5])
