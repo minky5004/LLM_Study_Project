@@ -89,7 +89,8 @@ class CausalSelfAttention(nn.Module):
     K (열쇠): 이 글자가 남의 질문에 "나는 이런 글자야" 하고 내미는 표시
     V (값):   이 글자가 참고당할 때 건네줄 내용
     셋 다 같은 글자 줄 x 에서 만들지만, 바꿔 주는 기계(nn.Linear)가 셋으로 따로라서 결과가 서로 다르다.
-    읽을 것은 4단계 문서의 4-1 ~ 4-5. 글자 하나가 앞 글자를 몇 % 참고할지 정해 새 줄을 만든다 (multi-head 는 조각 5).
+    조각 4 의 비율표를 줄 한 덩어리로 한 장 만들던 것을, 조각 5 에서 줄을 n_head 갈래(head)로 쪼개 갈래마다 한 장씩 만든다.
+    읽을 것은 4단계 문서의 4-1 ~ 4-5 (참고 비율 계산) · 5-1 ~ 5-4 (multi-head).
     """
 
     def __init__(self, config: ModelConfig):
@@ -113,6 +114,33 @@ class CausalSelfAttention(nn.Module):
         # 값을 만드는 기계. 숫자 표(가중치)가 따로라서 학습하면 질문 · 열쇠와 다른 일을 하게 된다.
         self.v_proj = nn.Linear(config.n_embd, config.n_embd)
 
+        # ---- 조각 5: multi-head (문서 5-1 ~ 5-4) ----
+        # 갈래 수와 갈래 하나의 칸 수. 128 칸 줄을 4 갈래로 쪼개면 갈래 하나는 32 칸 (128 // 4).
+        # config 가 n_embd % n_head == 0 을 검사해 두었으니 나누어 떨어진다.
+        self.n_head = config.n_head
+        self.head_dim = config.n_embd // config.n_head
+
+        # 갈래마다 따로 attention 한 결과를 이어 붙이면 갈래끼리는 아직 안 섞이고 나란히 놓여 있을 뿐이다.
+        # nn.Linear 한 번을 더 통과시켜 갈래들의 결과를 서로 섞는다 (output projection, 문서 5-4 ④).
+        # 파라미터가 128 x 128 + 128 = 16512 늘어난다.
+        self.o_proj = nn.Linear(config.n_embd, config.n_embd)
+
+    def _split_heads(self, t):
+        """줄을 n_head 갈래로 쪼개고 갈래 축을 글자 축 앞으로 보낸다. (B, T, C) -> (B, n_head, T, head_dim)"""
+        B, T, C = t.shape
+
+        # view 로 C 칸을 (갈래 수, 갈래 하나의 칸 수) 두 축으로 나눠 읽는다. (B, T, C) -> (B, T, n_head, head_dim)
+        # 숫자는 그대로이고 묶는 방식만 바뀐다 (문서 5-2 ③).
+        # 4, 32 를 직접 적지 않고 self 값을 쓰는 이유: n_head=8 로 바꿔도 4 x 32 = 128 이라 view 가 에러 없이 통과해
+        # 갈래가 4개로만 쪼개진 채 틀린 값이 나온다 (내장 attention 과 비교해서 확인).
+        t = t.view(B, T, self.n_head, self.head_dim)
+        # 결과: (2, 5, 128) -> view 뒤 torch.Size([2, 5, 4, 32])
+
+        # 글자 축 T(1번)와 갈래 축(2번)을 맞바꿔 갈래를 앞으로 보낸다. (B, T, n_head, head_dim) -> (B, n_head, T, head_dim)
+        # @ 와 softmax 는 맨 뒤 두 축만 보고 앞 축은 "묶음" 으로 취급한다. 갈래가 앞에 있어야 갈래마다 (T, head_dim) 표가 된다.
+        # 결과: transpose 뒤 torch.Size([2, 4, 5, 32]) · is_contiguous() False (숫자는 안 옮기고 읽는 순서만 바뀜)
+        return t.transpose(1, 2)
+
     def forward(self, x):
         """x: 조각 1 · 2 를 거친 글자 줄 묶음. shape (B, T, n_embd).
         반환: 앞 글자를 참고해 섞은 새 줄 묶음 y. shape (B, T, n_embd) — 입력과 같아서 뒤 부품이 그대로 이어받는다.
@@ -120,23 +148,27 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.shape  # 문장 수 · 글자 수 · 줄의 칸 수
 
         # 조각 3: 같은 x 에서 질문 · 열쇠 · 값을 만든다. 셋 다 shape (B, T, C).
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+        # 조각 5: 만든 줄을 바로 n_head 갈래로 쪼갠다. 셋 다 shape (B, n_head, T, head_dim).
+        q = self._split_heads(self.q_proj(x))
+        k = self._split_heads(self.k_proj(x))
+        v = self._split_heads(self.v_proj(x))
 
         # ---- ① 점수: 모든 글자 쌍의 질문-명찰이 얼마나 맞는지 (문서 4-1) ----
         # 질문 q 와 명찰 k 를 곱해서 더한다. @ 는 표 전체에 한 번에 해 주는 "곱해서 더하기".
         # @ 는 앞 표의 가로줄과 뒤 표의 세로줄을 짝짓는데 k 는 글자 하나가 가로줄이라, 뒤에서 두 번째 · 맨 뒤 축을 맞바꿔 뒤집는다.
-        # shape: (B, T, C) @ (B, C, T) -> (B, T, T). 줄 = 질문하는 글자, 칸 = 명찰을 내미는 글자
+        # 앞의 (B, n_head) 두 축은 묶음이라 문장마다 · 갈래마다 따로 계산된다 (문서 5-3 ②).
+        # shape: (B, n_head, T, head_dim) @ (B, n_head, head_dim, T) -> (B, n_head, T, T). 갈래마다 점수표 한 장
         scores = q @ k.transpose(-2, -1)
-        # 결과: B=2, T=5 일 때 scores.shape = torch.Size([2, 5, 5]) (transpose 를 빼면 (B, T, C) @ (B, T, C) 라 모양이 안 맞아 에러)
+        # 결과: B=2, T=5, n_head=4 일 때 scores.shape = torch.Size([2, 4, 5, 5])
 
         # ---- 크기 줄이기: 칸이 많으면 점수가 커져 softmax 가 한 글자에 100% 를 몰아 주므로 sqrt(칸 수)로 나눈다 (문서 4-2) ----
-        scores = scores / math.sqrt(C)
+        # 곱해서 더하는 줄이 이제 갈래 하나라서, 조각 4 의 sqrt(C) 대신 갈래 하나의 칸 수 sqrt(head_dim) 을 쓴다 (문서 5-3 ③).
+        scores = scores / math.sqrt(self.head_dim)
 
         # ---- ② 마스킹: 뒤 글자를 못 보게 가린다 (문서 4-3) ----
         # 볼 수 있는 칸 = 1 · 못 보는 칸 = 0 인 지도. tril 은 왼쪽 아래 삼각형만 남기고 나머지를 0 으로 만든다.
         # device=x.device: 지도를 입력과 같은 장치(GPU/CPU)에 만든다. 다르면 점수표와 계산이 안 된다.
+        # 지도는 (T, T) 한 장이다. 점수표가 (B, n_head, T, T) 여도 앞 두 축으로 자동 복사되어 모든 갈래에 같은 지도가 적용된다.
         mask = torch.tril(torch.ones(T, T, device=x.device))
         # 지도가 0 인 칸을 마이너스 무한대로 덮는다. -inf 는 softmax 를 거치면 정확히 0% 가 된다 (문서 4-4 ③).
         # 0 점으로 덮으면 "조금은 참고" 가 되어 0% 가 아니라서 -inf 를 쓴다.
@@ -145,20 +177,26 @@ class CausalSelfAttention(nn.Module):
         # ---- ③ softmax: 줄마다 점수를 합 1 인 %로 (문서 4-4) ----
         # dim=-1: 맨 뒤 축 방향 = 한 줄 안의 칸끼리 합을 1 로 맞춘다. 점수표의 한 줄이 한 글자의 참고 비율이라서다.
         att = F.softmax(scores, dim=-1)
-        # att: (B, T, T) — 줄마다 합 1, 가려진 칸은 0
-        # 결과: att.shape = torch.Size([2, 5, 5]) · 줄 합은 전부 1.0000 · 첫 문장의 비율표 (torch.manual_seed(0) · x = randn(2, 5, 128))
-        #       [[1.00, 0.00, 0.00, 0.00, 0.00],   <- 첫 글자는 자기뿐이라 항상 100%
-        #        [0.50, 0.50, 0.00, 0.00, 0.00],
-        #        [0.39, 0.35, 0.26, 0.00, 0.00],
-        #        [0.27, 0.31, 0.18, 0.24, 0.00],
-        #        [0.25, 0.15, 0.24, 0.21, 0.15]]   <- 위쪽 삼각형은 마스킹으로 정확히 0
+        # att: (B, n_head, T, T) — 줄마다 합 1, 가려진 칸은 0
+        # 결과: att.shape = torch.Size([2, 4, 5, 5]) · 줄 합 1.0 (torch.manual_seed(0) · x = randn(2, 5, 128)) · 갈래마다 비율표가 다르다
+        #       첫 문장 갈래 0 마지막 줄 [0.11, 0.16, 0.23, 0.23, 0.28] · 갈래 1 마지막 줄 [0.27, 0.11, 0.19, 0.13, 0.30]
 
         # ---- ④ 가져오기: % 대로 노트(v)를 섞어 새 줄을 만든다 (문서 4-5) ----
-        # 비율표와 노트를 곱해서 더한다. 앞에 비율표, 뒤에 노트. (B, T, T) @ (B, T, C) -> (B, T, C)
+        # 비율표와 노트를 곱해서 더한다. 앞에 비율표, 뒤에 노트.
+        # (B, n_head, T, T) @ (B, n_head, T, head_dim) -> (B, n_head, T, head_dim)
         y = att @ v
-        # 결과: y.shape = torch.Size([2, 5, 128]) — 입력 x 와 같은 모양
-        #       F.scaled_dot_product_attention(q, k, v, is_causal=True) 와 torch.allclose 가 True (내장 함수와 같은 값)
-        #       마지막 글자만 바꿔도 앞 4글자의 결과는 그대로 True (뒤 글자를 못 본다는 증거)
+        # 결과: y.shape = torch.Size([2, 4, 5, 32]) — 아직 갈래가 나뉜 채
+
+        # ---- ⑤ 합치기: 갈래들을 한 줄로 이어 붙이고 한 번 더 섞는다 (문서 5-4) ----
+        # 갈래 축을 글자 축 뒤로 되돌린 (B, T, n_head, head_dim) 을 한 줄 C 칸으로 이어 읽는다.
+        # contiguous: transpose 는 읽는 순서만 바꾸므로, view 전에 숫자를 새 순서대로 실제로 정리한다. 안 하면 view 가 에러 (문서 5-4 ③).
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        # 결과: 되돌린 뒤 torch.Size([2, 5, 4, 32]) · is_contiguous() False -> contiguous().view 뒤 torch.Size([2, 5, 128])
+
+        # 갈래끼리 섞는다. shape (B, T, C) 그대로.
+        y = self.o_proj(y)
+        # 결과: y.shape = torch.Size([2, 5, 128]) — 입력 x 와 같은 모양. F.scaled_dot_product_attention 을 갈래별로 쓴 것과 allclose True
+        #       (n_head = 1 · 2 · 4 · 8 모두). 마지막 글자만 바꿔도 앞 4글자 결과 그대로 (마스킹이 갈래마다 지켜진다)
 
         return y
 
@@ -184,7 +222,7 @@ if __name__ == "__main__":
     attn = CausalSelfAttention(config)
     y = attn(out)
     print(y.shape)  # 기대: torch.Size([2, 5, 128]) (입력과 같은 모양)
-    # 기대: 49536 (조각 3 과 같다 — 점수 · softmax 는 학습할 숫자가 없다)
+    # 기대: 66048 = 조각 3 의 49536 + o_proj 16512 (128 x 128 + 128). 갈래로 쪼개기 · 점수 · softmax 는 학습할 숫자가 없다
     print(sum(p.numel() for p in attn.parameters()))
 
     # 마스킹 확인: 마지막 글자만 바꿔도 앞 글자들의 새 줄은 그대로여야 한다 (뒤 글자를 못 보니까)
@@ -198,5 +236,7 @@ if __name__ == "__main__":
 # torch.Size([2, 5])
 # torch.Size([2, 5, 128])
 # 25216
-# torch.Size([2, 5, 128]) torch.Size([2, 5, 128]) torch.Size([2, 5, 128])
-# 49536
+# torch.Size([2, 5, 128])
+# 66048
+# True
+# False
