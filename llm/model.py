@@ -1,7 +1,7 @@
 """트랜스포머 아키텍처: 임베딩 -> attention -> FFN -> 조립.
 
 GPT-2식으로 먼저 완성하고, 돌아가면 부품을 하나씩 현대식으로 교체한다 (4단계 문서 참고).
-지금은 조각 6까지: 토큰 임베딩 + 위치 임베딩 (몇 번째 글자인지 알려 주기) + multi-head attention + 블록 (FFN · 잔차 · LayerNorm).
+지금은 조각 7까지: 토큰 임베딩 + 위치 임베딩 (몇 번째 글자인지 알려 주기) + multi-head attention + 블록 (FFN · 잔차 · LayerNorm) + 블록 쌓기 · 출력층.
 """
 
 import math
@@ -48,11 +48,30 @@ class GPT(nn.Module):
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
         # 결과: self.wpe.weight.shape = torch.Size([128, 128]) — 줄 128개(자리) × 칸 128개
 
+        # ---- 조각 7: 블록 쌓기 · 마지막 LayerNorm · 출력층 ----
+
+        # 블록 n_layer 개를 담는 부품 리스트. 블록은 입력과 출력 모양이 같아서 줄줄이 이어 붙일 수 있다 (문서 7-1).
+        # nn.ModuleList 로 감싸는 이유: 일반 리스트에 넣으면 torch 가 그 안의 학습 숫자를 장부에 못 올린다.
+        # 같은 블록 하나를 n_layer 번 복사하면 안 된다 — 층마다 자기만의 숫자를 따로 학습해야 해서 Block(config) 를 n_layer 번 "새로" 만든다.
+        # [Block(config) for _ in range(...)] — 반복문을 한 줄로 써서 리스트를 만드는 문법(컴프리헨션). `_` 는 반복 번호를 쓰지 않는다는 표시다.
+        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        # 결과: len(self.blocks) = 4 · type = ModuleList · blocks[0] 과 blocks[1] 의 FFN 가중치가 서로 다르다 (실행 확인 — 층마다 따로 학습)
+
+        # 마지막 LayerNorm (문서 7-2). 블록은 부품 "앞" 에서 줄을 맞추기 때문에 마지막 블록의 출력은 맞춰지지 않은 채 나온다.
+        # 출력층에 넣기 전에 한 번 더 맞춘다. 맞출 줄 한 개의 칸 수(맨 뒤 축)가 n_embd 라서 괄호에 n_embd 를 적는다.
+        self.ln_f = nn.LayerNorm(config.n_embd)
+        # 결과: 파라미터 256 = gamma 128 + beta 128 · 장부에 ln_f.weight · ln_f.bias 로 올라간다 (실행 확인)
+
+        # 출력층 (문서 7-3). 글자 줄(n_embd 칸)을 "글자 종류마다 점수 한 칸" 짜리 줄로 바꾼다.
+        # 들어오는 칸 수는 글자 줄의 n_embd · 나가는 칸 수는 글자 종류 수 vocab_size (칸 하나 = 글자 하나의 점수).
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size)
+        # 결과: lm_head.weight.shape = torch.Size([69, 128]) · 파라미터 8901 = 128 x 69 + 69
+
     def forward(self, idx):
         """forward = 데이터가 실제로 흘러가는 곳. 모델을 부를 때마다 실행된다.
 
         idx: 글자 번호 묶음. shape (B, T) — B = 문장 몇 개를 한꺼번에, T = 문장 하나의 글자 몇 개.
-        반환: 번호마다 숫자 줄이 붙은 텐서. shape (B, T, n_embd).
+        반환: 자리마다 "다음 글자가 각 글자일 점수" 가 붙은 텐서(logits). shape (B, T, vocab_size).
         """
         # 번호 묶음을 표에 넣으면, 번호마다 그 번호의 줄이 꺼내져 나온다 (계산이 아니라 표 찾기).
         # 번호 하나가 숫자 n_embd 개로 바뀌므로 shape 맨 뒤에 n_embd 가 붙는다: (B, T) -> (B, T, n_embd)
@@ -77,7 +96,20 @@ class GPT(nn.Module):
         # 이어 붙이는 게 아니라 칸마다 더한다 (그래서 shape 가 그대로).
         x = tok_emb + pos_emb
         # 결과: (2, 5, 128) + (5, 128) -> (2, 5, 128). 번호 [0, 1, 0] 의 첫째 · 셋째 줄이 이제 서로 다름 (조각 1 에서는 같았다 — 실행 확인)
-        return x
+
+        # 블록을 순서대로 통과시킨다. 앞 블록의 출력이 다음 블록의 입력이다. 블록은 모양을 안 바꾸므로 x 는 계속 (B, T, n_embd).
+        for block in self.blocks:
+            x = block(x)
+        # 결과: 블록 4개를 지나도 x 는 계속 (2, 5, 128) — 모양이 안 바뀌어서 이어 붙일 수 있다
+
+        # 마지막 LayerNorm 으로 줄을 맞춘 뒤 출력층에 넣는다. (B, T, n_embd) -> (B, T, vocab_size)
+        # logits = softmax 를 거치기 전의 날점수. 확률로 바꾸는 일은 학습 · 생성 단계에서 한다.
+        x = self.ln_f(x)
+        logits = self.lm_head(x)
+        # 결과: logits.shape = torch.Size([2, 5, 69]) — 자리마다 글자 종류별 점수 69개
+        #       한 줄의 합이 1 이 아니다 (-1.349 — 날점수의 증거) · 전체 파라미터 827461
+        #       마지막 글자만 바꿔도 앞 4글자의 logits 는 그대로 True (모델 전체에서도 마스킹이 지켜진다)
+        return logits
 
 
 # ---- 조각 3: Q / K / V (글자 하나에서 질문 · 열쇠 · 값 세 줄 만들기) ----
@@ -283,10 +315,17 @@ if __name__ == "__main__":
     # 그래서 상한은 표의 줄 수와 같은 vocab_size (config.n_embd 는 줄 수가 아니라 칸 수라 안 된다).
     idx = torch.randint(0, config.vocab_size, (B, T))
 
-    out = model(idx)
+    # 조각 7 부터 model(idx) 는 글자별 점수(logits)를 낸다. 조각 1~6 확인은 "임베딩만 거친 줄" 이 필요해서 표를 직접 불러 만든다.
+    out = model.wte(idx) + model.wpe(torch.arange(T))
     print(idx.shape)   # 기대: torch.Size([2, 5])
     print(out.shape)   # 기대: torch.Size([2, 5, 128]) (자리를 더해도 모양은 그대로)
     # 기대: 25216 = 글자 표 8832 (69 x 128) + 자리표 16384 (128 x 128)
+    print(model.wte.weight.numel() + model.wpe.weight.numel())
+
+    # 조각 7 확인: 모델 전체. 번호 (B, T) 가 들어가 글자 종류마다 점수 한 칸씩 (B, T, vocab_size) 이 나온다
+    logits = model(idx)
+    print(logits.shape)  # 기대: torch.Size([2, 5, 69])
+    # 기대: 827461 = 임베딩 25216 + 블록 198272 x 4 + ln_f 256 + 출력층 8901 (128 x 69 + 69)
     print(sum(p.numel() for p in model.parameters()))
 
     # 조각 3 확인: 위치까지 섞은 out 을 attention 부품에 넣어 Q / K / V 를 만든다
@@ -326,6 +365,8 @@ if __name__ == "__main__":
 # torch.Size([2, 5])
 # torch.Size([2, 5, 128])
 # 25216
+# torch.Size([2, 5, 69])
+# 827461
 # torch.Size([2, 5, 128])
 # 66048
 # True
