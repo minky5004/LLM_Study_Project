@@ -140,24 +140,28 @@ if __name__ == "__main__":
 
     # 모델 설정을 만들 때 글자 종류 수를 토크나이저가 센 값으로 덮어쓴다 (문서 4-1).
     # config.py 의 기본값 69 는 손으로 적은 숫자라, 글이 바뀌면 센 값과 어긋나 IndexError 가 날 수 있다.
-    # [빈칸 1] vocab_size 인자에 위에서 import 한 토크나이저의 값을 넘기자. 넘긴 값이 기본값 69 를 덮어쓴다.
-    config = ModelConfig(vocab_size=____)
+    # vocab_size 인자에 위에서 import 한 토크나이저의 값을 넘긴다. 넘긴 값이 기본값 69 를 덮어쓴다.
+    config = ModelConfig(vocab_size=vocab_size)
+    # 결과: config.vocab_size = 69 (토크나이저가 센 값 — 지금은 기본값과 같다) · ModelConfig(vocab_size=70) 처럼 넘기면 70 으로 덮어써진다
 
     # 4단계에서 만든 모델을 설정대로 만든다.
-    # [빈칸 2] GPT 는 만들 때 크기 값들이 든 설정 하나를 받는다. 방금 만든 설정을 넘기자.
-    model = GPT(____)
+    # GPT 는 만들 때 크기 값들이 든 설정 하나를 받는다. 방금 만든 설정을 넘긴다.
+    model = GPT(config)
+    # 결과: 임베딩 표 줄 수 model.wte.num_embeddings = 69 (config.vocab_size 와 같다) · 파라미터 827461
 
     # 진짜 글에서 묶음을 하나 뽑는다. xb 는 입력 · yb 는 한 칸 민 정답 — 둘 다 (32, 128).
     xb, yb = get_batch("train")
 
     # 모델에 넣어 글자마다의 점수(logits)를 받는다 (문서 4-2).
-    # [빈칸 3] 모델이 받는 것은 "입력" 이다. 정답은 점수를 채점할 때(6단계) 쓴다. xb 와 yb 중 무엇을 넣을까?
-    logits = model(____)
-    print(logits.shape)  # 기대: 쉼표로 구분된 숫자 세 개 — 쌍 수 · 쌍마다 글자 수 · 글자 종류마다 한 칸
+    # 모델이 받는 것은 "입력" xb 다. 정답 yb 는 점수를 채점할 때(6단계) 쓴다.
+    logits = model(xb)
+    print(logits.shape)  # 기대: torch.Size([32, 128, 69]) — 쌍 수 · 쌍마다 글자 수 · 글자 종류마다 한 칸
+    # 결과: logits.shape = torch.Size([32, 128, 69]) · 번호 최댓값 xb.max() = 68 (표 69줄의 마지막 줄 안)
+    #       ModelConfig(vocab_size=70) 로 만든 모델은 (32, 128, 70) — 마지막 숫자가 설정을 따라간다
 
     # 모양이 예상과 같은지 코드로 못 박는다. 틀리면 AssertionError 로 바로 멈춘다.
-    # [빈칸 4] 마지막 숫자는 글자마다 붙는 점수의 개수다. 어느 값과 같을까? (config 에서 꺼내 쓰자)
-    assert logits.shape == (batch_size, block_size, ____)
+    # 마지막 숫자는 글자마다 붙는 점수의 개수 = 글자 종류 수라서 config 에서 꺼내 쓴다. 숫자 69 를 또 적지 않는다.
+    assert logits.shape == (batch_size, block_size, config.vocab_size)
 
 # ---- 직접 실행 결과 (uv run python -m llm.dataset) ----
 # torch.Size([65572]) torch.int64
@@ -176,3 +180,4 @@ if __name__ == "__main__":
 # True
 # torch.Size([32, 128]) torch.Size([32, 128])
 # False
+# torch.Size([32, 128, 69])
