@@ -1,7 +1,8 @@
 """학습 루프.
 
-지금은 조각 2까지: 장치 · 모델 · 옵티마이저 준비 (문서 1-1 ~ 1-3) · 틀린 정도 계산 (문서 2-1 ~ 2-3).
-숫자 고치기 · 반복은 이어지는 조각에서 이 파일에 붙인다.
+지금은 조각 3까지: 장치 · 모델 · 옵티마이저 준비 (문서 1-1 ~ 1-3) · 틀린 정도 계산 (문서 2-1 ~ 2-3)
+· 한 번 고치기와 반복 (문서 3-1 ~ 3-4).
+점검 · 저장은 이어지는 조각에서 이 파일에 붙인다.
 """
 
 import torch
@@ -66,6 +67,52 @@ loss = F.cross_entropy(logits_flat, targets_flat)
 # 결과: loss = 4.3236 (스칼라 텐서) — 학습 전이라 ln(69) ≈ 4.23 근처. 묶음이 무작위라 실행마다 조금 다르다 (문서 2-3)
 
 
+# ---- 조각 3: 한 번 고치기 → 반복 ----
+
+# 한 번 고치기 (문서 3-1 ~ 3-3). 위 조각 2 에서 잰 loss 를 가지고 모델 숫자를 고친다.
+# 순서는 "기울기 비우기 → 기울기 계산 → 숫자 고치기" 다.
+
+# 옵티마이저가 들고 있는 이전 기울기 메모를 비운다 (문서 3-3).
+# 안 비우면 계산한 기울기가 이전 것에 더해져 섞인다.
+optimizer.zero_grad()
+
+# loss 에서 거꾸로 거슬러 올라가 모든 파라미터의 기울기를 계산한다 (문서 3-1).
+# 기울기 = "그 숫자를 올리면 loss 가 얼마나 변하나". 계산 결과는 각 파라미터 안에 저장된다.
+loss.backward()
+
+# 계산된 기울기를 보고 모든 파라미터를 학습률(3e-4)만큼 고친다 (문서 3-2).
+optimizer.step()
+
+# 같은 묶음을 다시 재면 손실이 내려가 있어야 한다. 고친 효과를 눈으로 보는 확인이다.
+loss_after = F.cross_entropy(model(xb).view(B * T, V), targets_flat)
+# 결과: loss 4.34 → loss_after 4.09 — 한 걸음만으로 내려감 (값은 묶음이 무작위라 실행마다 조금 다르다)
+
+
+def train():
+    """묶음 뽑기 → 점수 → 손실 → 고치기를 max_iters 번 되풀이한다 (문서 3-4)."""
+    # 몇 번 되풀이할지는 TrainConfig 의 max_iters (3000) 가 정한다.
+    for step in range(train_config.max_iters):
+        # 매번 새 묶음을 뽑아 장치로 옮긴다. 같은 묶음만 보면 그 묶음만 외우게 된다.
+        xb, yb = get_batch("train")
+        xb, yb = xb.to(device), yb.to(device)
+
+        # 점수 → 펴기 → 손실. 조각 2 와 같다.
+        logits = model(xb)
+        B, T, V = logits.shape
+        loss = F.cross_entropy(logits.view(B * T, V), yb.view(B * T))
+
+        # 한 번 고치기. 위에서 한 세 줄과 같다.
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        # 일정 간격마다 손실을 찍어 내려가는지 본다.
+        # 찍는 간격은 eval_interval (300). 비슷한 이름 eval_iters (50) 는 검증 손실을 평균 낼 묶음 수라 다르다.
+        if step % train_config.eval_interval == 0:
+            print(f"step {step}: loss {loss.item():.4f}")
+            # 결과: step 0 → 4.18 · 300 → 0.64 · 600 → 0.21 · 900 → 0.19 · 이후 0.18 ~ 0.19 에서 멈춤 (40초 · 10줄)
+
+
 # 직접 실행했을 때만 확인용 출력 (uv run python -m llm.train)
 if __name__ == "__main__":
     print(device)  # 기대: cuda (GPU 를 못 잡으면 cpu — 그러면 CUDA 판 torch 설치를 먼저 본다)
@@ -76,6 +123,10 @@ if __name__ == "__main__":
     # 옵티마이저가 들고 있는 학습률 — TrainConfig 의 값과 같아야 한다
     print(optimizer.param_groups[0]["lr"])  # 기대: 0.0003
     # 틀린 정도 — 학습 전이라 69글자를 찍어 맞히는 값 ln(69) 근처여야 한다
-    print(loss.item())  # 기대: 약 4.23 (4.1 ~ 4.4)
+    print(loss.item())  # 기대: 약 4.23 (4.1 ~ 4.6 — 묶음이 무작위라 실행마다 조금 다르다)
     # 펴기 전 · 후 모양 — (B, T, V) 가 (B*T, V) 로
     print(logits.shape, logits_flat.shape, targets_flat.shape)  # 기대: [32,128,69] [4096,69] [4096]
+    # 한 번 고친 뒤 같은 묶음으로 다시 잰 손실 — 위 loss 보다 작아야 한다
+    print(loss_after.item())  # 기대: loss 보다 작은 값 (한 걸음만 갔으니 조금만)
+    # 반복 학습 — 손실이 4 대에서 내려가는지 본다
+    train()  # 기대: step 0 ~ 2700 까지 300 간격으로 10줄 · 값이 점점 작아짐
