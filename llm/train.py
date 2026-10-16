@@ -1,8 +1,8 @@
 """학습 루프.
 
-지금은 조각 3까지: 장치 · 모델 · 옵티마이저 준비 (문서 1-1 ~ 1-3) · 틀린 정도 계산 (문서 2-1 ~ 2-3)
-· 한 번 고치기와 반복 (문서 3-1 ~ 3-4).
-점검 · 저장은 이어지는 조각에서 이 파일에 붙인다.
+지금은 조각 4까지: 장치 · 모델 · 옵티마이저 준비 (문서 1-1 ~ 1-3) · 틀린 정도 계산 (문서 2-1 ~ 2-3)
+· 한 번 고치기와 반복 (문서 3-1 ~ 3-4) · 학습용/검증용 손실 점검 (문서 4-1 ~ 4-3).
+저장은 이어지는 조각에서 이 파일에 붙인다.
 """
 
 import torch
@@ -88,6 +88,44 @@ loss_after = F.cross_entropy(model(xb).view(B * T, V), targets_flat)
 # 결과: loss 4.34 → loss_after 4.09 — 한 걸음만으로 내려감 (값은 묶음이 무작위라 실행마다 조금 다르다)
 
 
+# ---- 조각 4: 점검 — 학습용 · 검증용 손실 평균 ----
+
+# [빈칸 1] 이 함수 안에서는 기울기를 기록하지 않게 하는 꾸밈(데코레이터: 함수 위에 붙여 동작을 바꾸는 표시)을 넣는다 (문서 4-3 ②).
+# 힌트: torch.____()
+@____
+def estimate_loss():
+    """학습용 · 검증용 글에서 각각 eval_iters 개 묶음의 손실을 평균 내어 {"train": ..., "val": ...} 로 돌려준다 (문서 4-1 · 4-2)."""
+    result = {}
+
+    # [빈칸 2] dropout 을 끄고 재도록 모델을 점검 모드로 바꾼다 (문서 4-3 ③).
+    # 힌트: model.____()
+    ____
+
+    for split in ("train", "val"):
+        # 묶음마다 손실을 적어 둘 빈 칸 eval_iters(50) 개
+        losses = torch.zeros(train_config.eval_iters)
+        for k in range(train_config.eval_iters):
+            # [빈칸 3] split 에 맞는 글에서 묶음을 뽑는다 — 첫 번째 반복은 "train" · 두 번째는 "val" 이다.
+            # 힌트: get_batch 에 무엇을 넘겨야 하나? (get_batch("train") 처럼 쓰던 자리)
+            xb, yb = get_batch(____)
+            xb, yb = xb.to(device), yb.to(device)
+
+            # 점수 → 펴기 → 손실. 조각 2 와 같고, 고치는 세 줄(zero_grad · backward · step)은 없다 — 점수만 재는 일이다.
+            logits = model(xb)
+            B, T, V = logits.shape
+            loss = F.cross_entropy(logits.view(B * T, V), yb.view(B * T))
+            # 숫자 하나짜리 텐서에서 파이썬 숫자만 꺼내 k 번째 칸에 적는다.
+            losses[k] = loss.item()
+
+        # [빈칸 4] 50개 손실을 평균 낸다 (문서 4-1 ②). 결과는 숫자 하나짜리 텐서이니 .item() 으로 꺼낸다.
+        # 힌트: losses.____()
+        result[split] = losses.____().item()
+
+    # 점검이 끝났으니 학습 모드로 되돌린다. 안 되돌리면 이후 학습이 dropout 없이 돈다 (문서 4-3 ④).
+    model.train()
+    return result
+
+
 def train():
     """묶음 뽑기 → 점수 → 손실 → 고치기를 max_iters 번 되풀이한다 (문서 3-4)."""
     # 몇 번 되풀이할지는 TrainConfig 의 max_iters (3000) 가 정한다.
@@ -106,11 +144,11 @@ def train():
         loss.backward()
         optimizer.step()
 
-        # 일정 간격마다 손실을 찍어 내려가는지 본다.
-        # 찍는 간격은 eval_interval (300). 비슷한 이름 eval_iters (50) 는 검증 손실을 평균 낼 묶음 수라 다르다.
+        # 일정 간격마다 학습용 · 검증용 손실을 찍어 내려가는지 본다.
+        # 찍는 간격은 eval_interval (300). 한 묶음 손실이 아니라 eval_iters (50) 개 묶음 평균이다 (조각 4).
         if step % train_config.eval_interval == 0:
-            print(f"step {step}: loss {loss.item():.4f}")
-            # 결과: step 0 → 4.18 · 300 → 0.64 · 600 → 0.21 · 900 → 0.19 · 이후 0.18 ~ 0.19 에서 멈춤 (40초 · 10줄)
+            losses = estimate_loss()
+            print(f"step {step}: train {losses['train']:.4f} · val {losses['val']:.4f}")
 
 
 # 직접 실행했을 때만 확인용 출력 (uv run python -m llm.train)
