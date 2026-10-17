@@ -90,24 +90,22 @@ loss_after = F.cross_entropy(model(xb).view(B * T, V), targets_flat)
 
 # ---- 조각 4: 점검 — 학습용 · 검증용 손실 평균 ----
 
-# [빈칸 1] 이 함수 안에서는 기울기를 기록하지 않게 하는 꾸밈(데코레이터: 함수 위에 붙여 동작을 바꾸는 표시)을 넣는다 (문서 4-3 ②).
-# 힌트: torch.____()
-@____
+# 이 함수 안에서는 기울기를 기록하지 않는다 (문서 4-3 ②). 데코레이터 = 함수 위에 붙여 동작을 바꾸는 표시.
+# 점수만 재고 고치지 않으니 기록이 필요 없고, 안 하면 메모리 · 시간만 쓴다.
+@torch.no_grad()
 def estimate_loss():
     """학습용 · 검증용 글에서 각각 eval_iters 개 묶음의 손실을 평균 내어 {"train": ..., "val": ...} 로 돌려준다 (문서 4-1 · 4-2)."""
     result = {}
 
-    # [빈칸 2] dropout 을 끄고 재도록 모델을 점검 모드로 바꾼다 (문서 4-3 ③).
-    # 힌트: model.____()
-    ____
+    # dropout 을 끄고 재도록 모델을 점검 모드로 바꾼다 (문서 4-3 ③). 매번 같은 조건으로 재려는 것이다.
+    model.eval()
 
     for split in ("train", "val"):
         # 묶음마다 손실을 적어 둘 빈 칸 eval_iters(50) 개
         losses = torch.zeros(train_config.eval_iters)
         for k in range(train_config.eval_iters):
-            # [빈칸 3] split 에 맞는 글에서 묶음을 뽑는다 — 첫 번째 반복은 "train" · 두 번째는 "val" 이다.
-            # 힌트: get_batch 에 무엇을 넘겨야 하나? (get_batch("train") 처럼 쓰던 자리)
-            xb, yb = get_batch(____)
+            # split 에 맞는 글에서 묶음을 뽑는다 — 첫 번째 반복은 "train" · 두 번째는 "val" (문서 4-2).
+            xb, yb = get_batch(split)
             xb, yb = xb.to(device), yb.to(device)
 
             # 점수 → 펴기 → 손실. 조각 2 와 같고, 고치는 세 줄(zero_grad · backward · step)은 없다 — 점수만 재는 일이다.
@@ -117,9 +115,9 @@ def estimate_loss():
             # 숫자 하나짜리 텐서에서 파이썬 숫자만 꺼내 k 번째 칸에 적는다.
             losses[k] = loss.item()
 
-        # [빈칸 4] 50개 손실을 평균 낸다 (문서 4-1 ②). 결과는 숫자 하나짜리 텐서이니 .item() 으로 꺼낸다.
-        # 힌트: losses.____()
-        result[split] = losses.____().item()
+        # 50개 손실을 평균 낸다 (문서 4-1 ②). 결과는 숫자 하나짜리 텐서이니 .item() 으로 꺼낸다.
+        result[split] = losses.mean().item()
+        # 결과: 학습 직후 result = {"train": 0.18.., "val": 0.18..} 꼴 — 아래 train() 출력 참고
 
     # 점검이 끝났으니 학습 모드로 되돌린다. 안 되돌리면 이후 학습이 dropout 없이 돈다 (문서 4-3 ④).
     model.train()
@@ -149,6 +147,8 @@ def train():
         if step % train_config.eval_interval == 0:
             losses = estimate_loss()
             print(f"step {step}: train {losses['train']:.4f} · val {losses['val']:.4f}")
+            # 결과: step 0 → train 3.93 · val 3.94 / 300 → 0.68 · 0.68 / 600 → 0.24 · 0.24 / 900 → 0.19 · 0.19 / 2700 → 0.18 대 · 0.19 대 (묶음이 무작위라 소수 셋째 자리부터 실행마다 다르다)
+            # 둘이 거의 같다 — 대화가 학습용 · 검증용에 다 들어 있는 토이 데이터라서 (5단계). 외운 게 아니라는 증거는 못 된다
 
 
 # 직접 실행했을 때만 확인용 출력 (uv run python -m llm.train)
