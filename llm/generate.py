@@ -54,6 +54,6 @@ with torch.no_grad():
 
 # 직접 실행했을 때만 확인용 출력 (uv run python -m llm.generate)
 if __name__ == "__main__":
-    print(idx.shape)  # 기대: torch.Size([1, 10]) — 문장 1개 · 글자 10개 ("사용자: 배고파\n봇:" 은 10글자)
+    print(idx.shape)  # 기대: torch.Size([1, 11]) — 문장 1개 · 글자 11개 ("사용자: 배고파\n봇:")
     print(decode(idx[0].tolist()))  # 기대: 시작 글이 그대로 — 번호로 바꿨다 되돌려 제자리인지 확인
     print(logits.shape)  # 기대: torch.Size([1, 11, 69]) — 글자 자리마다 69개 점수
