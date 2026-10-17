@@ -1,9 +1,11 @@
 """학습 루프.
 
-지금은 조각 4까지: 장치 · 모델 · 옵티마이저 준비 (문서 1-1 ~ 1-3) · 틀린 정도 계산 (문서 2-1 ~ 2-3)
+지금은 조각 5까지: 장치 · 모델 · 옵티마이저 준비 (문서 1-1 ~ 1-3) · 틀린 정도 계산 (문서 2-1 ~ 2-3)
 · 한 번 고치기와 반복 (문서 3-1 ~ 3-4) · 학습용/검증용 손실 점검 (문서 4-1 ~ 4-3).
-저장은 이어지는 조각에서 이 파일에 붙인다.
+학습한 숫자 저장 · 불러와 확인 (문서 5-1 ~ 5-2).
 """
+
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -124,6 +126,42 @@ def estimate_loss():
     return result
 
 
+# ---- 조각 5: 학습한 모델 저장 ----
+
+# 저장할 파일 경로. checkpoints/ 폴더는 .gitignore 에 있어 리포에 안 올라간다 (문서 5-1 ③).
+checkpoint_path = Path("checkpoints/model.pt")
+
+
+def save_model():
+    """모델이 배운 숫자만 파일에 적는다 (문서 5-2 ① ②)."""
+    # 폴더가 없으면 만든다. 이미 있어도 에러 없이 넘어간다 (exist_ok=True).
+    checkpoint_path.parent.mkdir(exist_ok=True)
+
+    # 모델의 "이름 → 숫자 덩어리" 사전을 뽑는다. 구조는 코드에 있으니 숫자만 있으면 된다 (문서 5-2 ①).
+    weights = model.state_dict()
+    # 결과: 사전 하나 · 숫자 덩어리 827461개분 (임베딩 · 어텐션 · FFN · LayerNorm · 출력층 가중치)
+
+    # 그 사전을 파일에 적는다. 인자는 (저장할 것, 경로) 순서.
+    torch.save(weights, checkpoint_path)
+    # 결과: checkpoints/model.pt 생성 · 약 3.2MB (827461개 × 4바이트)
+
+
+def check_saved_model():
+    """저장한 파일을 빈 모델에 불러와 학습한 모델과 같은 점수가 나오는지 본다 (문서 5-2 ③ ④)."""
+    # 같은 설정으로 만든 빈 모델. 숫자는 아직 무작위다.
+    fresh = GPT(model_config).to(device)
+
+    # 파일의 숫자를 빈 모델에 채워 넣는다. 파일은 torch.load 로 읽는다 (map_location 은 GPU 로 바로 읽으라는 뜻).
+    fresh.load_state_dict(torch.load(checkpoint_path, map_location=device))
+
+    # dropout 이 켜져 있으면 점수가 매번 달라지니 둘 다 점검 모드로 바꾸고 같은 입력을 넣는다.
+    model.eval()
+    fresh.eval()
+    with torch.no_grad():
+        return torch.equal(model(xb), fresh(xb))
+        # 결과: True — 불러온 모델의 점수가 학습한 모델과 한 칸도 다르지 않다
+
+
 def train():
     """묶음 뽑기 → 점수 → 손실 → 고치기를 max_iters 번 되풀이한다 (문서 3-4)."""
     # 몇 번 되풀이할지는 TrainConfig 의 max_iters (3000) 가 정한다.
@@ -168,3 +206,6 @@ if __name__ == "__main__":
     print(loss_after.item())  # 기대: loss 보다 작은 값 (한 걸음만 갔으니 조금만)
     # 반복 학습 — 손실이 4 대에서 내려가는지 본다
     train()  # 기대: step 0 ~ 2700 까지 300 간격으로 10줄 · 값이 점점 작아짐
+    # 학습이 끝난 숫자를 파일로 적고, 불러온 모델과 점수를 비교한다
+    save_model()
+    print(check_saved_model())  # 기대: True (같은 점수)
