@@ -1,7 +1,7 @@
 """추론·텍스트 생성.
 
-지금은 조각 2까지: 저장한 모델 불러오기 · 시작 글을 번호 텐서로 (문서 1-1 ~ 1-2) · 다음 글자 하나 뽑기 (문서 2-1 ~ 2-2).
-이어 쓰기 · 대화는 이어지는 조각에서 이 파일에 붙인다.
+지금은 조각 3까지: 저장한 모델 불러오기 · 시작 글을 번호 텐서로 (문서 1-1 ~ 1-2) · 다음 글자 하나 뽑기 (문서 2-1 ~ 2-2) · 이어 쓰기 (문서 3-1 ~ 3-2).
+대화는 이어지는 조각에서 이 파일에 붙인다.
 """
 
 from pathlib import Path
@@ -69,6 +69,32 @@ next_idx = torch.multinomial(probs, num_samples=1)
 # 결과: next_idx.shape = torch.Size([1, 1]) · decode 하면 ' ' (공백) — "봇:" 뒤는 학습 데이터 3000개가 전부 공백이라 3번 실행해도 같다
 
 
+# ---- 조각 3: 한 글자씩 붙여 이어 쓰기 ----
+
+# 조각 2 의 "점수 → 확률 → 뽑기" 를 max_new_tokens 번 되풀이하는 함수. 뽑을 때마다 입력 뒤에 붙인다 (문서 3-1).
+# 위 조각 2 는 한 걸음을 풀어서 보여 준 것이고, 아래 함수 안의 같은 줄들이 실제로 되풀이된다.
+@torch.no_grad()  # 점수만 재는 일이라 기록을 끈다 (조각 1 의 with torch.no_grad() 와 같은 일)
+def generate(model, idx, max_new_tokens):
+    """idx (1, T) 뒤에 글자를 max_new_tokens 개 이어 붙여 (1, T + max_new_tokens) 를 돌려준다."""
+    for _ in range(max_new_tokens):
+        # 모델은 block_size(128) 글자까지만 볼 수 있다 (문서 3-2). 모델에 줄 입력만 맨 끝 block_size 글자로 자른다.
+        # 붙여 나가는 원본 idx 는 자르지 않는다. 글자가 모자라면 자를 것 없이 전부 남는다.
+        # block_size 는 모델을 만든 model_config 에서 꺼낸다 — 모델의 위치 표 크기와 같은 값이라 어긋날 일이 없다.
+        idx_cond = idx[:, -model_config.block_size:]
+
+        logits = model(idx_cond)  # (1, T') -> (1, T', 69)  (T' = 잘린 뒤 길이, 최대 128)
+        last = logits[:, -1, :]  # (1, T', 69) -> (1, 69)  마지막 자리 점수 (조각 2)
+        probs = F.softmax(last, dim=-1)  # (1, 69) 점수 -> 확률
+        next_idx = torch.multinomial(probs, num_samples=1)  # (1, 1) 뽑힌 글자 번호
+
+        # 뽑은 글자를 idx 뒤에 이어 붙인다 (문서 3-1). (1, T) + (1, 1) -> (1, T + 1)
+        # dim=1 은 글자 자리가 늘어선 방향(가로). dim=0 이면 묶음 칸 쪽으로 쌓여 문장이 2개가 된다.
+        idx = torch.cat((idx, next_idx), dim=1)
+    return idx
+# 결과: generate(model, idx, 40).shape = torch.Size([1, 51]) · 200글자 이어 써도 torch.Size([1, 211]) (128 넘어도 에러 없음)
+# 결과: 40글자 예 — 시작 글 뒤로 "봇: 아직 안 먹었어요" 다음 "사용자: 반가워" · "봇: 안녕하세요" 처럼 대화가 이어짐 (뽑기라 실행마다 다름)
+
+
 # 직접 실행했을 때만 확인용 출력 (uv run python -m llm.generate)
 if __name__ == "__main__":
     print(idx.shape)  # 기대: torch.Size([1, 11]) — 문장 1개 · 글자 11개 ("사용자: 배고파\n봇:")
@@ -78,3 +104,7 @@ if __name__ == "__main__":
     print(probs.sum().item())  # 기대: 1.0 근처 — 확률은 합이 1
     print(next_idx.shape)  # 기대: torch.Size([1, 1]) — 뽑힌 글자 번호 1개
     print(repr(decode(next_idx[0].tolist())))  # 기대: ' ' (공백) — "봇:" 뒤는 공백이 거의 확실
+    out = generate(model, idx, max_new_tokens=40)
+    print(out.shape)  # 기대: torch.Size([1, 51]) — 시작 글 11글자 + 새 글자 40개
+    print(decode(out[0].tolist()))  # 기대: 시작 글 뒤에 40글자가 이어진 글 (뽑기라 실행마다 다를 수 있다)
+    print(generate(model, idx, max_new_tokens=200).shape)  # 기대: torch.Size([1, 211]) — 128 글자를 넘겨도 에러 없이 (자르기가 돌아야 통과)
