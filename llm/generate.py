@@ -1,12 +1,13 @@
 """추론·텍스트 생성.
 
-지금은 조각 1까지: 저장한 모델 불러오기 · 시작 글을 번호 텐서로 (문서 1-1 ~ 1-2).
-다음 글자 뽑기 · 이어 쓰기 · 대화는 이어지는 조각에서 이 파일에 붙인다.
+지금은 조각 2까지: 저장한 모델 불러오기 · 시작 글을 번호 텐서로 (문서 1-1 ~ 1-2) · 다음 글자 하나 뽑기 (문서 2-1 ~ 2-2).
+이어 쓰기 · 대화는 이어지는 조각에서 이 파일에 붙인다.
 """
 
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 from llm.config import ModelConfig
 from llm.model import GPT
@@ -52,8 +53,28 @@ with torch.no_grad():
 # 결과: logits.shape = torch.Size([1, 11, 69]) — 글자 자리 11개마다 69개 점수
 
 
+# ---- 조각 2: 다음 글자 하나 뽑기 ----
+
+# 점수 (1, 11, 69) 에서 맨 마지막 글자 자리의 69개 점수만 꺼낸다 (문서 2-1).
+# 시작 글을 끝까지 읽은 뒤에 올 글자가 궁금하니 마지막 자리다. 묶음 칸은 그대로 · 글자 자리는 맨 끝 · 점수는 전부.
+last = logits[:, -1, :]
+# 결과: last.shape = torch.Size([1, 69]) — 마지막 자리의 점수 69개
+
+# 69개 점수를 확률로 바꾼다 — 0 이상 · 합이 1 (문서 2-2 ②). 69개가 늘어선 방향은 맨 끝 칸이다.
+probs = F.softmax(last, dim=-1)
+# 결과: probs.shape = torch.Size([1, 69]) · probs.sum() = 1.0000001 (소수 계산 오차) · 공백 확률 0.9999
+
+# 확률대로 글자 번호 하나를 뽑는다 (문서 2-2 ③). 확률 0.7 인 글자는 10번 중 약 7번 뽑힌다.
+next_idx = torch.multinomial(probs, num_samples=1)
+# 결과: next_idx.shape = torch.Size([1, 1]) · decode 하면 ' ' (공백) — "봇:" 뒤는 학습 데이터 3000개가 전부 공백이라 3번 실행해도 같다
+
+
 # 직접 실행했을 때만 확인용 출력 (uv run python -m llm.generate)
 if __name__ == "__main__":
     print(idx.shape)  # 기대: torch.Size([1, 11]) — 문장 1개 · 글자 11개 ("사용자: 배고파\n봇:")
     print(decode(idx[0].tolist()))  # 기대: 시작 글이 그대로 — 번호로 바꿨다 되돌려 제자리인지 확인
     print(logits.shape)  # 기대: torch.Size([1, 11, 69]) — 글자 자리마다 69개 점수
+    print(last.shape)  # 기대: torch.Size([1, 69]) — 마지막 자리의 점수 69개
+    print(probs.sum().item())  # 기대: 1.0 근처 — 확률은 합이 1
+    print(next_idx.shape)  # 기대: torch.Size([1, 1]) — 뽑힌 글자 번호 1개
+    print(repr(decode(next_idx[0].tolist())))  # 기대: ' ' (공백) — "봇:" 뒤는 공백이 거의 확실
