@@ -1,7 +1,7 @@
 """추론·텍스트 생성.
 
-지금은 조각 3까지: 저장한 모델 불러오기 · 시작 글을 번호 텐서로 (문서 1-1 ~ 1-2) · 다음 글자 하나 뽑기 (문서 2-1 ~ 2-2) · 이어 쓰기 (문서 3-1 ~ 3-2).
-대화는 이어지는 조각에서 이 파일에 붙인다.
+지금은 조각 4까지: 저장한 모델 불러오기 · 시작 글을 번호 텐서로 (문서 1-1 ~ 1-2) · 다음 글자 하나 뽑기 (문서 2-1 ~ 2-2) · 이어 쓰기 (문서 3-1 ~ 3-2) · 대화 (문서 4-1 ~ 4-2).
+조각 4 가 마지막이다: 사용자 말을 시작 글로 만들고 · 답 한 줄만 잘라 · 터미널 대화로 묶는다.
 """
 
 from pathlib import Path
@@ -94,6 +94,41 @@ def generate(model, idx, max_new_tokens):
 # 결과: generate(model, idx, 40).shape = torch.Size([1, 51]) · 200글자 이어 써도 torch.Size([1, 211]) (128 넘어도 에러 없음)
 # 결과: 40글자 예 — 시작 글 뒤로 "봇: 아직 안 먹었어요" 다음 "사용자: 반가워" · "봇: 안녕하세요" 처럼 대화가 이어짐 (뽑기라 실행마다 다름)
 
+# ---- 조각 4: 대화해 보기 ----
+
+def reply(model, text, max_new_tokens=60):
+    """사용자가 한 말 text 에 모델이 봇으로서 답한 한 줄을 돌려준다. 예) "배고파" -> "아직 안 먹었어요"."""
+    # 학습 데이터와 똑같은 모양의 시작 글을 만든다 (문서 4-1). 모양: "사용자: " + 말 + 줄바꿈 + "봇:"
+    # 이 모양이어야 모델이 봇의 답을 이어 쓴다 (조각 1 의 prompt 와 같은 모양).
+    prompt = f"사용자: {text}\n봇:"
+    # 결과: text 가 "배고파" 면 prompt 는 조각 1 의 시작 글과 같다 (11글자)
+
+    idx = torch.tensor([encode(prompt)], dtype=torch.long, device=device)  # 조각 1: 시작 글 -> (1, T) 번호 텐서
+    out = generate(model, idx, max_new_tokens)  # 조각 3: 시작 글 뒤에 max_new_tokens 글자를 이어 붙인다 -> (1, T + max_new_tokens)
+    new_text = decode(out[0].tolist())[len(prompt):]  # 번호 -> 글, 시작 글 길이만큼 앞을 잘라 새로 만든 부분만 남긴다
+
+    # 모델은 봇의 답이 끝나도 멈추지 않고 다음 "사용자:" 줄까지 계속 만든다 (조각 3 의 한계).
+    # 학습 데이터에서 봇의 답은 한 줄이라 줄바꿈이 나오면 답이 끝난 것이다 (문서 4-2). 첫 줄바꿈 앞까지만 취한다.
+    # split 은 글을 그 글자 기준으로 잘라 리스트로 돌려주고, [0] 은 맨 앞 조각이다.
+    answer = new_text.split("\n")[0]
+    # 결과: new_text 가 " 물풀을 먹었어요" 다음 줄바꿈 둘 · "사용자: ..." 로 이어져도 answer 는 " 물풀을 먹었어요"
+
+    return answer.strip()  # "봇:" 바로 뒤가 공백이라 답이 공백으로 시작한다 — 앞뒤 공백을 걷어 낸다
+    # 결과: reply(model, "배고파") = '물풀을 먹었어요' (줄바꿈 없음 · 뽑기라 실행마다 다름) · "hello" 는 encode 에서 KeyError -> chat() 이 "모르는 글자가 있어요" 출력
+
+
+def chat():
+    """터미널에서 한 줄씩 말을 주고받는다. 그냥 엔터를 치면 끝난다. 이전 말은 기억하지 않는다 (매번 새 시작 글)."""
+    print("봇과 대화합니다 (그냥 엔터를 치면 끝)")
+    while True:
+        text = input("사용자: ")
+        if not text:
+            break
+        try:
+            print("봇:", reply(model, text))
+        except KeyError:  # encode 가 학습 글에 없는 글자(69개 밖)를 만나면 KeyError — 영어 · 느낌표 등
+            print("봇: 모르는 글자가 있어요")
+
 
 # 직접 실행했을 때만 확인용 출력 (uv run python -m llm.generate)
 if __name__ == "__main__":
@@ -108,3 +143,7 @@ if __name__ == "__main__":
     print(out.shape)  # 기대: torch.Size([1, 51]) — 시작 글 11글자 + 새 글자 40개
     print(decode(out[0].tolist()))  # 기대: 시작 글 뒤에 40글자가 이어진 글 (뽑기라 실행마다 다를 수 있다)
     print(generate(model, idx, max_new_tokens=200).shape)  # 기대: torch.Size([1, 211]) — 128 글자를 넘겨도 에러 없이 (자르기가 돌아야 통과)
+    a = reply(model, "배고파")
+    print(repr(a))  # 기대: 줄바꿈 없는 짧은 한 줄, 예) '아직 안 먹었어요' (뽑기라 실행마다 다를 수 있다)
+    print("\n" in a)  # 기대: False — 답이 한 줄로 끊겼는지
+    chat()  # 직접 말해 보기 — 그냥 엔터를 치면 끝
