@@ -30,26 +30,26 @@ model = GPT(model_config).to(device)
 # 6단계에서 저장한 파일. 학습한 숫자 827461개가 들어 있다.
 checkpoint_path = Path("checkpoints/model.pt")
 
-# [빈칸 1] 파일의 숫자를 빈 모델에 채워 넣는다 (문서 1-1 ②). 파일은 torch.load 로 읽는다.
-# 힌트: model.____(torch.load(checkpoint_path, map_location=device))
-____(torch.load(checkpoint_path, map_location=device))
+# 파일의 숫자를 빈 모델에 채워 넣는다 (문서 1-1 ②). 파일은 torch.load 로 읽는다.
+model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+# 결과: <All keys matched successfully> — 저장한 숫자 827461개가 빈 모델 칸에 그대로 들어감
 
-# [빈칸 2] 글을 만들 때는 dropout 을 꺼야 한다 — 모델을 점검 모드로 바꾼다 (6단계 문서 4-3 ③).
-# 힌트: model.____()
-____
+# 글을 만들 때는 dropout 을 꺼야 한다 — 모델을 점검 모드로 바꾼다 (6단계 문서 4-3 ③).
+model.eval()
 
 # 글을 이어 쓰게 할 시작 글. 학습 데이터와 같은 모양("사용자: ...\n봇:")이라 모델이 봇의 답을 이어 쓰게 된다.
 prompt = "사용자: 배고파\n봇:"
 
-# [빈칸 3] 시작 글을 모델이 받는 모양 (1, T) 의 번호 텐서로 만든다 (문서 1-2).
+# 시작 글을 모델이 받는 모양 (1, T) 의 번호 텐서로 만든다 (문서 1-2).
 # encode(prompt) 는 길이 T 인 번호 리스트 하나를 돌려준다. 모델은 (B, T) — "문장 B개 묶음" 을 받는다.
 # 문장이 한 개뿐이니 B = 1 이 되도록 리스트를 한 겹 더 감싼다. dtype 은 번호이니 long, device 는 모델과 같은 곳.
-# 힌트: torch.tensor(____, dtype=torch.long, device=device)
-idx = ____
+idx = torch.tensor([encode(prompt)], dtype=torch.long, device=device)
+# 결과: idx.shape = torch.Size([1, 11]) — 문장 1개 · 글자 11개 (시작 글 "사용자: 배고파" + 줄바꿈 + "봇:")
 
 # 점수만 재는 일이라 기록(no_grad)을 끈다 (6단계 문서 4-3 ②). 모델에 넣으면 글자 자리마다 69개 점수가 나온다.
 with torch.no_grad():
     logits = model(idx)
+# 결과: logits.shape = torch.Size([1, 11, 69]) — 글자 자리 11개마다 69개 점수
 
 
 # 직접 실행했을 때만 확인용 출력 (uv run python -m llm.generate)
