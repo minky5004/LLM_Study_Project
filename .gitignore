@@ -20,6 +20,12 @@ __pycache__/
 # 학습 중 저장하는 모델 가중치 파일이 들어갈 폴더 (6단계에서 생김). 파일이 커서 올리지 않는다
 checkpoints/
 
+# ── 내려받는 데이터 ──
+# 공개 대화 데이터(songys/Chatbot_data) 원본과, 그걸 바꿔 만든 학습 글. 남의 데이터 복사본이라 리포에 두지 않는다.
+# 받는 코드(data/make_dataset.py)만 올린다 — `uv run python data/make_dataset.py` 를 돌리면 누구든 같은 파일이 생긴다
+data/raw/
+data/train.txt
+
 # ── Claude 관련 ──
 # Claude 작업용 메모 · 설정 파일. 개인 기록이라 리포에 올리지 않는다
 CLAUDE.md
