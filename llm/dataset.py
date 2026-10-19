@@ -1,6 +1,6 @@
 """학습 데이터 로딩 · 배치 구성.
 
-지금은 조각 3까지: 글 전체를 번호 텐서로 바꾸고 학습용 · 검증용으로 나눈다 (읽을 것은 5단계 문서의 1-1 ~ 1-3).
+조각 1: 학습용 · 검증용 글을 각각 번호 텐서로 바꾼다 (읽을 것은 5단계 문서의 1-1 ~ 1-3 · 8단계 문서 2-2).
 그다음 입력 x · 정답 y 를 한 칸 밀어 잘라 낸다 (문서 2-1 ~ 2-4).
 무작위 위치 여러 곳에서 잘라 묶음(배치)으로 쌓아 주는 get_batch 함수를 만든다 (문서 3-1 ~ 3-4).
 마지막으로 뽑은 묶음을 모델에 넣어 출력 모양을 확인하고, 글자 종류 수 vocab_size 를 한 곳에서만 정하게 잇는다 (문서 4-1 ~ 4-2).
@@ -11,35 +11,25 @@ import torch
 from llm.config import ModelConfig, TrainConfig
 from llm.model import GPT
 
-# text: tokenizer.py 가 train.txt 를 읽어 둔 글 전체 (65572자).
+# train_text · val_text: tokenizer.py 가 읽어 둔 학습용 · 검증용 글 (8단계 조각 2 부터 파일이 둘).
 # encode: 글 -> 번호 목록(파이썬 리스트) · decode: 번호 목록 -> 글.
-# 주의: tokenizer 를 import 하면 그 모듈 최상위가 실행되어 train.txt 를 읽는다. 프로젝트 루트에서 `-m` 으로 실행해야 경로가 맞는다.
+# 주의: tokenizer 를 import 하면 그 모듈 최상위가 실행되어 두 파일을 읽는다. 프로젝트 루트에서 `-m` 으로 실행해야 경로가 맞는다.
 # vocab_size: 토크나이저가 글에서 센 글자 종류 수 (조각 4 에서 모델 설정에 넘겨 준다).
-from llm.tokenizer import decode, encode, text, vocab_size
+from llm.tokenizer import decode, encode, train_text, val_text, vocab_size
 
 
-# ---- 조각 1: 글 전체를 번호 텐서로 + 학습용 · 검증용으로 나누기 ----
+# ---- 조각 1: 학습용 · 검증용 글을 각각 번호 텐서로 ----
 
-# 글 전체를 번호 목록으로 바꾼 뒤 텐서로 감싼다 (문서 1-1).
+# 글을 번호 목록으로 바꾼 뒤 텐서로 감싼다 (문서 1-1).
 # 번호는 "임베딩 표의 몇 번째 줄" 이라 정수여야 한다. nn.Embedding 은 정수만 받는다.
 # dtype 에 64비트 정수 타입 torch.long 을 지정한다 (소수 타입이면 임베딩 표에서 에러가 난다).
-data = torch.tensor(encode(text), dtype=torch.long)
-# 결과: data.shape = torch.Size([65572]) · data.dtype = torch.int64 (torch.long 과 같은 타입)
-#       data[:13] = [35, 50, 57, 2, 1, 31, 5, 65, 0, 32, 2, 1, 27] — "사용자: 배고파\n봇: 물"
-
-# 앞 90% 는 학습용 · 뒤 10% 는 검증용으로 가를 "자리 번호" 를 구한다 (문서 1-2 · 1-3).
-# 0.9 * len(data) 는 소수(59014.8)가 나오는데 자리 번호는 정수여야 해서 int() 로 소수점 아래를 버린다.
-n = int(0.9 * len(data))
-# 결과: n = 59014 (0.9 * 65572 = 59014.8 에서 소수점 아래를 버림)
-
-# 슬라이스 [시작:끝] — 시작 자리부터 끝 자리 "앞까지". 앞이나 뒤를 비우면 처음부터 · 끝까지다 (문서 1-3).
-# 학습용: 처음부터 n 앞까지 · 검증용: n 부터 끝까지. 두 구간은 겹치지 않고 합치면 전체와 같다.
-train_data = data[:n]
-val_data = data[n:]
-# 결과: len(train_data) = 59014 · len(val_data) = 6558 (합 65572 — 이어 붙이면 원본과 torch.equal 로 같다)
-#       val_data 맨 앞 20자 = ' 이름은 아직 없어요\n\n사용자: 너는' — 90% 지점이 대화 경계와 무관해서 문장 중간에서 시작한다
-#       이 토이 데이터는 서로 다른 대화 46종류를 3000번 반복한 것이라, 검증용 대화 296개가 전부 학습용에도 똑같이 있다
-#       (나누는 구조를 익히는 데 의미가 있고 "외웠나 배웠나" 를 엄밀히 가르지는 못한다)
+# 5 · 6 · 7단계에서는 글 하나를 앞 90% · 뒤 10% 로 잘랐다. 8단계 조각 2 부터는 make_dataset.py 가 질문 단위로 나눈
+# 두 파일을 따로 읽어서 자를 일이 없다 — 검증용 질문이 학습용에 섞이지 않고, 경계에서 대화가 잘리지도 않는다 (8단계 문서 2-1 · 2-2).
+train_data = torch.tensor(encode(train_text), dtype=torch.long)
+val_data = torch.tensor(encode(val_text), dtype=torch.long)
+# 결과: train_data.shape = torch.Size([413139]) · val_data.shape = torch.Size([46705]) · dtype torch.int64
+#       decode(val_data[:20]) = '사용자: 면허 따는 중\n봇: 안전 운' — 파일이 따로라 대화 첫머리부터 시작한다
+#       (5단계 때는 90% 지점이 대화 경계와 무관해 문장 중간에서 시작했다)
 
 
 # ---- 조각 2: 입력 x 와 정답 y — 한 칸 민 쌍 ----
@@ -57,15 +47,15 @@ i = 0
 x = train_data[i : i + block_size]
 y = train_data[i + 1 : i + block_size + 1]
 # 결과: x.shape = y.shape = torch.Size([128])
-#       decode(x[:13]) = '사용자: 배고파\n봇: 물' · decode(y[:13]) = '용자: 배고파\n봇: 물풀' — y 는 같은 자리 x 글자의 바로 다음 글자
+#       decode(x[:13]) = '사용자: 나를 좋아하는데' · decode(y[:13]) = '용자: 나를 좋아하는데 ' — y 는 같은 자리 x 글자의 바로 다음 글자
 #       torch.equal(y[:-1], x[1:]) = True (y 의 앞 127개 = x 의 뒤 127개 — 한 칸 밀렸다는 증거)
 
 # 시작 위치로 쓸 수 있는 자리의 개수 (문서 2-4). y 는 x 보다 한 글자 더 뒤까지 필요하다.
 # 시작 위치 i 에서 y 의 끝은 i + block_size + 1 (끝 앞까지) 이라, 이게 글 길이를 넘으면 y 가 모자란다.
 # 그러면 i 는 0 ~ (글 길이 - block_size - 1) 이고, 0 부터 세므로 이 범위의 개수는 (글 길이 - block_size) 다 (-1 과 +1 이 서로 없어진다).
 n_starts = len(train_data) - block_size
-# 결과: n_starts = 58886 (= 59014 - 128)
-#       경계 확인: 마지막 시작 위치(58885)에서 y 는 정확히 128개 · 한 칸만 더 가면 127개로 모자란다
+# 결과: n_starts = 413011 (= 413139 - 128)
+#       경계 확인: 마지막 시작 위치(413010)에서 y 는 정확히 128개 · 한 칸만 더 가면 127개로 모자란다
 
 
 # ---- 조각 3: get_batch — 무작위 위치 여러 곳에서 잘라 쌓기 ----
@@ -90,7 +80,7 @@ def get_batch(split):
     # 조각 2 에서 구한 "y 가 모자라지 않는 시작 위치의 개수" 를 상한으로 쓴다.
     # 검증용 글은 학습용보다 짧아서 개수가 달라지므로, 숫자를 고정하지 않고 뽑는 글(source)의 길이로 계산한다.
     ix = torch.randint(len(source) - block_size, (batch_size,))
-    # 결과: ix.shape = torch.Size([32]) · 값은 0 이상 (len(source) - 128) 미만 — 학습용이면 0 ~ 58885 · 검증용이면 0 ~ 6429
+    # 결과: ix.shape = torch.Size([32]) · 값은 0 이상 (len(source) - 128) 미만 — 학습용이면 0 ~ 413010 · 검증용이면 0 ~ 46576
 
     # 뽑은 위치마다 x 를 잘라 위아래로 쌓는다 (문서 3-3).
     # [source[i : i + block_size] for i in ix] 는 위치마다 길이 block_size 짜리 조각을 만든 리스트 (컴프리헨션).
@@ -109,18 +99,16 @@ def get_batch(split):
 
 # 직접 실행했을 때만 확인용 출력 (uv run python -m llm.dataset)
 if __name__ == "__main__":
-    print(data.shape, data.dtype)  # 기대: torch.Size([65572]) torch.int64
-    print(len(train_data), len(val_data))  # 기대: 59014 6558
-    print(len(train_data) + len(val_data) == len(data))  # 기대: True (겹침도 빠짐도 없다)
+    print(train_data.shape, val_data.shape, train_data.dtype)  # 학습용 · 검증용 글의 글자 수 · int64
     # 텐서를 파이썬 리스트로 되돌려 decode 에 넣는다. 검증용 글의 맨 앞이 어떤 글인지 눈으로 본다.
-    print(repr(decode(val_data[:20].tolist())))  # 기대: 사람이 읽을 수 있는 대화 글 20자
+    print(repr(decode(val_data[:20].tolist())))  # 기대: '사용자: ' 로 시작 — 파일이 따로라 대화 첫머리부터
 
     # 조각 2 확인: x 와 y 는 길이가 같고, y 는 x 를 한 칸 민 것이다
     print(x.shape, y.shape)  # 기대: torch.Size([128]) torch.Size([128])
-    print(repr(decode(x[:13].tolist())))  # 기대: '사용자: 배고파\n봇: 물' (글 맨 앞 13자)
-    print(repr(decode(y[:13].tolist())))  # 기대: '용자: 배고파\n봇: 물풀' (같은 자리 글자의 바로 다음 글자)
+    print(repr(decode(x[:13].tolist())))  # 학습용 글 맨 앞 13자
+    print(repr(decode(y[:13].tolist())))  # 같은 자리 글자의 바로 다음 글자
     print(torch.equal(y[:-1], x[1:]))  # 기대: True (y 의 앞 127개 = x 의 뒤 127개)
-    print(n_starts)  # 기대: 58886 (= 59014 - 128)
+    print(n_starts)  # 기대: 학습용 글자 수 - 128
     # 경계: 마지막 시작 위치에서는 y 가 정확히 128개 · 한 칸만 더 가면 127개로 모자란다
     last = n_starts - 1
     print(len(train_data[last + 1 : last + block_size + 1]))  # 기대: 128
@@ -142,12 +130,12 @@ if __name__ == "__main__":
     # config.py 의 기본값 69 는 손으로 적은 숫자라, 글이 바뀌면 센 값과 어긋나 IndexError 가 날 수 있다.
     # vocab_size 인자에 위에서 import 한 토크나이저의 값을 넘긴다. 넘긴 값이 기본값 69 를 덮어쓴다.
     config = ModelConfig(vocab_size=vocab_size)
-    # 결과: config.vocab_size = 69 (토크나이저가 센 값 — 지금은 기본값과 같다) · ModelConfig(vocab_size=70) 처럼 넘기면 70 으로 덮어써진다
+    # 결과: config.vocab_size = 1244 (토크나이저가 센 값 — config.py 의 기본값 69 를 덮어씀. 글이 바뀌어도 config.py 는 손대지 않았다)
 
     # 4단계에서 만든 모델을 설정대로 만든다.
     # GPT 는 만들 때 크기 값들이 든 설정 하나를 받는다. 방금 만든 설정을 넘긴다.
     model = GPT(config)
-    # 결과: 임베딩 표 줄 수 model.wte.num_embeddings = 69 (config.vocab_size 와 같다) · 파라미터 827461
+    # 결과: 임베딩 표 줄 수 model.wte.num_embeddings = 1244 · 파라미터 1,129,436 (글자 69개일 때 827,461 — 글자 표 · 출력층이 커진 만큼)
 
     # 진짜 글에서 묶음을 하나 뽑는다. xb 는 입력 · yb 는 한 칸 민 정답 — 둘 다 (32, 128).
     xb, yb = get_batch("train")
@@ -155,24 +143,21 @@ if __name__ == "__main__":
     # 모델에 넣어 글자마다의 점수(logits)를 받는다 (문서 4-2).
     # 모델이 받는 것은 "입력" xb 다. 정답 yb 는 점수를 채점할 때(6단계) 쓴다.
     logits = model(xb)
-    print(logits.shape)  # 기대: torch.Size([32, 128, 69]) — 쌍 수 · 쌍마다 글자 수 · 글자 종류마다 한 칸
-    # 결과: logits.shape = torch.Size([32, 128, 69]) · 번호 최댓값 xb.max() = 68 (표 69줄의 마지막 줄 안)
-    #       ModelConfig(vocab_size=70) 로 만든 모델은 (32, 128, 70) — 마지막 숫자가 설정을 따라간다
+    print(logits.shape)  # 기대: torch.Size([32, 128, vocab_size]) — 쌍 수 · 쌍마다 글자 수 · 글자 종류마다 한 칸
+    # 결과: logits.shape = torch.Size([32, 128, 1244])
 
     # 모양이 예상과 같은지 코드로 못 박는다. 틀리면 AssertionError 로 바로 멈춘다.
-    # 마지막 숫자는 글자마다 붙는 점수의 개수 = 글자 종류 수라서 config 에서 꺼내 쓴다. 숫자 69 를 또 적지 않는다.
+    # 마지막 숫자는 글자마다 붙는 점수의 개수 = 글자 종류 수라서 config 에서 꺼내 쓴다. 숫자를 또 적지 않는다.
     assert logits.shape == (batch_size, block_size, config.vocab_size)
 
 # ---- 직접 실행 결과 (uv run python -m llm.dataset) ----
-# torch.Size([65572]) torch.int64
-# 59014 6558
-# True
-# ' 이름은 아직 없어요\n\n사용자: 너는'
+# torch.Size([413139]) torch.Size([46705]) torch.int64
+# '사용자: 면허 따는 중\n봇: 안전 운'
 # torch.Size([128]) torch.Size([128])
-# '사용자: 배고파\n봇: 물'
-# '용자: 배고파\n봇: 물풀'
+# '사용자: 나를 좋아하는데'
+# '용자: 나를 좋아하는데 '
 # True
-# 58886
+# 413011
 # 128
 # 127
 # torch.Size([32, 128]) torch.Size([32, 128])
@@ -180,4 +165,4 @@ if __name__ == "__main__":
 # True
 # torch.Size([32, 128]) torch.Size([32, 128])
 # False
-# torch.Size([32, 128, 69])
+# torch.Size([32, 128, 1244])

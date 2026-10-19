@@ -25,6 +25,7 @@ checkpoints/
 # 받는 코드(data/make_dataset.py)만 올린다 — `uv run python data/make_dataset.py` 를 돌리면 누구든 같은 파일이 생긴다
 data/raw/
 data/train.txt
+data/val.txt
 
 # ── Claude 관련 ──
 # Claude 작업용 메모 · 설정 파일. 개인 기록이라 리포에 올리지 않는다
