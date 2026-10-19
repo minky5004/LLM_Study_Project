@@ -3,8 +3,11 @@
 지금은 조각 5까지: 장치 · 모델 · 옵티마이저 준비 (문서 1-1 ~ 1-3) · 틀린 정도 계산 (문서 2-1 ~ 2-3)
 · 한 번 고치기와 반복 (문서 3-1 ~ 3-4) · 학습용/검증용 손실 점검 (문서 4-1 ~ 4-3).
 학습한 숫자 저장 · 불러와 확인 (문서 5-1 ~ 5-2).
+8단계 조각 3: 모델 키우기(6층 · 256칸) · dropout 0.2 · 검증 손실이 가장 좋을 때만 저장 · 설정도 같이 저장 (8단계 문서 3-1 ~ 3-5).
 """
 
+# asdict: dataclass(설정 상자)를 {이름: 값} 사전으로 바꾸는 함수. 모델 파일에 설정을 같이 넣을 때 쓴다 (8단계 문서 3-5).
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -28,13 +31,19 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # 설정 상자 두 개를 만든다. 모델 크기는 ModelConfig · 학습 방법은 TrainConfig 가 들고 있다.
 # 글자 종류 수는 토크나이저가 센 값으로 덮어쓴다 (5단계 4-1 과 같다).
-model_config = ModelConfig(vocab_size=vocab_size)
-train_config = TrainConfig()
+# 8단계 조각 3: 대화 1만 개 데이터에 맞춰 크기 · dropout · 학습 횟수를 바꾼다. 같은 조건에서 재 본 결과로 고른 값이다 (8단계 문서 3-2 · 3-3).
+#   4층 · 128칸 · 3000번 → 검증 1.88 (덜 배움) · 6층 · 256칸 · dropout 0 → 검증 최저 1.72 뒤 외우기
+#   6층 · 256칸 · dropout 0.2 · 5000번 → 검증 최저 1.63 (4500번째) · 외우기가 거의 없음
+# config.py 의 기본값(4층 · 128칸 · 0.1)은 4단계 확인용 그대로 두고, 학습할 때만 여기서 덮어쓴다.
+# 이 값은 모델 파일에 같이 저장되어 generate.py 가 그대로 읽는다 — 크기를 두 곳에 적지 않는다 (8단계 문서 3-5).
+# n_head=8: 256 칸을 8 갈래로 쪼개 갈래마다 32칸 (지금까지와 같은 갈래 크기).
+model_config = ModelConfig(vocab_size=vocab_size, n_layer=6, n_embd=256, n_head=8, dropout=0.2)
+train_config = TrainConfig(max_iters=5000)
 
 # 모델을 만들어 장치로 옮긴다 (문서 1-2).
 # 모델의 숫자(파라미터)가 GPU 메모리에 있어야 GPU 가 계산할 수 있다. 한 번 옮기면 끝이다.
 model = GPT(model_config).to(device)
-# 결과: 모델 숫자가 cuda:0 (0번 GPU) 에 놓임 · 파라미터 827461개
+# 결과: 모델 숫자가 cuda:0 (0번 GPU) 에 놓임 · 파라미터 5,410,012개 (6층 · 256칸 · 글자 1244개 — 7단계까지 4층 · 128칸 · 69개일 땐 827,461)
 
 # 옵티마이저를 만든다 (문서 1-3).
 # AdamW 에 "고칠 숫자 목록" 과 "한 번에 얼마나 고칠지(학습률)" 를 넘긴다. 아직 고치지는 않는다 — 고치는 일은 조각 3 에서 한다.
@@ -51,22 +60,23 @@ xb, yb = get_batch("train")
 xb, yb = xb.to(device), yb.to(device)
 # 결과: xb.shape = yb.shape = torch.Size([32, 128]) · xb.device = cuda:0
 
-# 모델에 넣어 글자 자리마다 69개 점수를 받는다.
+# 모델에 넣어 글자 자리마다 글자 종류 수(1244)만큼 점수를 받는다.
 logits = model(xb)
-# 결과: logits.shape = torch.Size([32, 128, 69]) = (B, T, V) — 묶음 32 · 글자 자리 128 · 글자 종류 69
+# 결과: logits.shape = torch.Size([32, 128, 1244]) = (B, T, V) — 묶음 32 · 글자 자리 128 · 글자 종류 1244
 B, T, V = logits.shape
 
 # 점수와 정답을 "문제 B*T 개" 모양으로 편다 (문서 2-2).
 # cross_entropy 는 점수 (N, V) · 정답 (N,) 을 기대한다. 줄 · 자리를 구분할 이유가 없으니 앞 두 축을 합친다.
 logits_flat = logits.view(B * T, V)
-# 결과: logits_flat.shape = torch.Size([4096, 69]) — 문제 4096개 × 보기 69개
+# 결과: logits_flat.shape = torch.Size([4096, 1244]) — 문제 4096개 × 보기 1244개
 targets_flat = yb.view(B * T)
 # 결과: targets_flat.shape = torch.Size([4096]) — 문제 4096개의 정답
 
 # 틀린 정도를 숫자 하나로 만든다 (문서 2-1).
 # 점수는 확률로 바꾸기 전 그대로 넣는다. 확률 변환 · 정답 글자 확률 꺼내기 · 평균은 함수가 안에서 한다.
 loss = F.cross_entropy(logits_flat, targets_flat)
-# 결과: loss = 4.3236 (스칼라 텐서) — 학습 전이라 ln(69) ≈ 4.23 근처. 묶음이 무작위라 실행마다 조금 다르다 (문서 2-3)
+# 결과: loss = 7.2626 (스칼라 텐서) — 학습 전이라 찍어서 맞힐 때의 ln(1244) ≈ 7.13 근처. 묶음이 무작위라 실행마다 조금 다르다 (문서 2-3)
+#       (글자 69개일 땐 4.32 · ln(69) ≈ 4.23)
 
 
 # ---- 조각 3: 한 번 고치기 → 반복 ----
@@ -87,7 +97,7 @@ optimizer.step()
 
 # 같은 묶음을 다시 재면 손실이 내려가 있어야 한다. 고친 효과를 눈으로 보는 확인이다.
 loss_after = F.cross_entropy(model(xb).view(B * T, V), targets_flat)
-# 결과: loss 4.34 → loss_after 4.09 — 한 걸음만으로 내려감 (값은 묶음이 무작위라 실행마다 조금 다르다)
+# 결과: loss 7.26 → loss_after 6.64 — 한 걸음만으로 내려감 (값은 묶음이 무작위라 실행마다 조금 다르다)
 
 
 # ---- 조각 4: 점검 — 학습용 · 검증용 손실 평균 ----
@@ -119,7 +129,7 @@ def estimate_loss():
 
         # 50개 손실을 평균 낸다 (문서 4-1 ②). 결과는 숫자 하나짜리 텐서이니 .item() 으로 꺼낸다.
         result[split] = losses.mean().item()
-        # 결과: 학습 직후 result = {"train": 0.18.., "val": 0.18..} 꼴 — 아래 train() 출력 참고
+        # 결과: 학습 끝 무렵 result = {"train": 1.21.., "val": 1.64..} 꼴 — 아래 train() 출력 참고
 
     # 점검이 끝났으니 학습 모드로 되돌린다. 안 되돌리면 이후 학습이 dropout 없이 돈다 (문서 4-3 ④).
     model.train()
@@ -133,38 +143,53 @@ checkpoint_path = Path("checkpoints/model.pt")
 
 
 def save_model():
-    """모델이 배운 숫자만 파일에 적는다 (문서 5-2 ① ②)."""
+    """모델이 배운 숫자와 모델 설정을 함께 파일에 적는다 (문서 5-2 ① ② · 8단계 문서 3-5)."""
     # 폴더가 없으면 만든다. 이미 있어도 에러 없이 넘어간다 (exist_ok=True).
     checkpoint_path.parent.mkdir(exist_ok=True)
 
-    # 모델의 "이름 → 숫자 덩어리" 사전을 뽑는다. 구조는 코드에 있으니 숫자만 있으면 된다 (문서 5-2 ①).
+    # 모델의 "이름 → 숫자 덩어리" 사전을 뽑는다 (문서 5-2 ①).
     weights = model.state_dict()
-    # 결과: 사전 하나 · 숫자 덩어리 827461개분 (임베딩 · 어텐션 · FFN · LayerNorm · 출력층 가중치)
 
-    # 그 사전을 파일에 적는다. 인자는 (저장할 것, 경로) 순서.
-    torch.save(weights, checkpoint_path)
-    # 결과: checkpoints/model.pt 생성 · 약 3.2MB (827461개 × 4바이트)
+    # 8단계 조각 3: 숫자만 적던 것을 {설정, 숫자} 사전 하나로 적는다.
+    # 크기(6층 · 256칸)를 학습 때 바꾸므로, 불러오는 쪽이 그 크기를 이 파일에서 읽어 같은 모양의 빈 모델을 만든다 (8단계 문서 3-5).
+    # asdict(model_config) = {"vocab_size": ..., "n_layer": 6, ...} — 숫자 · 글자만 든 사전이라 torch.load 가 안전하게 읽는다.
+    # "model" 이름표에는 바로 위에서 뽑은 모델의 숫자 사전 weights.
+    torch.save({"config": asdict(model_config), "model": weights}, checkpoint_path)
+    # 결과: checkpoints/model.pt 21,668,891 바이트 (약 21MB = 5,410,012개 × 4바이트 + 설정) · 7단계까지는 숫자만 3.2MB
+    #       torch.load 하면 키 ['config', 'model'] · config = {'vocab_size': 1244, 'block_size': 128, 'n_embd': 256, 'n_head': 8, 'n_layer': 6, 'dropout': 0.2}
 
 
 def check_saved_model():
-    """저장한 파일을 빈 모델에 불러와 학습한 모델과 같은 점수가 나오는지 본다 (문서 5-2 ③ ④)."""
-    # 같은 설정으로 만든 빈 모델. 숫자는 아직 무작위다.
-    fresh = GPT(model_config).to(device)
+    """저장한 파일만으로 빈 모델을 만들어 불러오고, 학습한 모델과 같은 점수가 나오는지 본다 (문서 5-2 ③ ④)."""
+    # 파일을 읽는다. 안에 {"config": 설정 사전, "model": 숫자 사전} 이 들어 있다 (map_location 은 GPU 로 바로 읽으라는 뜻).
+    ckpt = torch.load(checkpoint_path, map_location=device)
 
-    # 파일의 숫자를 빈 모델에 채워 넣는다. 파일은 torch.load 로 읽는다 (map_location 은 GPU 로 바로 읽으라는 뜻).
-    fresh.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    # 파일에 적힌 설정만으로 빈 모델을 만든다 — train.py 의 model_config 를 쓰지 않는다.
+    # 그래야 "파일 하나가 자기 크기를 기억한다" 는 것까지 확인된다 (8단계 문서 3-5).
+    # ModelConfig(**사전): 사전의 이름표를 인자 이름으로 풀어 넣는다. ModelConfig(vocab_size=1244, n_layer=6, ...) 와 같다.
+    fresh = GPT(ModelConfig(**ckpt["config"])).to(device)
+
+    # 파일의 숫자를 빈 모델에 채워 넣는다.
+    fresh.load_state_dict(ckpt["model"])
 
     # dropout 이 켜져 있으면 점수가 매번 달라지니 둘 다 점검 모드로 바꾸고 같은 입력을 넣는다.
     model.eval()
     fresh.eval()
     with torch.no_grad():
         return torch.equal(model(xb), fresh(xb))
-        # 결과: True — 불러온 모델의 점수가 학습한 모델과 한 칸도 다르지 않다
+        # 결과: True — 파일만으로 만든 모델의 점수가 (가장 좋았을 때로 되돌린) 학습한 모델과 한 칸도 다르지 않다
 
 
 def train():
-    """묶음 뽑기 → 점수 → 손실 → 고치기를 max_iters 번 되풀이한다 (문서 3-4)."""
-    # 몇 번 되풀이할지는 TrainConfig 의 max_iters (3000) 가 정한다.
+    """묶음 뽑기 → 점수 → 손실 → 고치기를 max_iters 번 되풀이한다 (문서 3-4).
+
+    8단계 조각 3: 점검 때마다 검증 손실이 지금까지의 최저보다 낮으면 그때만 저장한다 (8단계 문서 3-4).
+    돌려주는 값: 가장 좋았던 검증 손실.
+    """
+    # 지금까지의 최저 검증 손실. 처음엔 무한대(어떤 숫자보다 큼) — 첫 점검은 무조건 "더 낮음" 이 되어 저장된다.
+    best_val = float("inf")
+
+    # 몇 번 되풀이할지는 TrainConfig 의 max_iters 가 정한다 (위에서 5000 으로 덮어씀).
     for step in range(train_config.max_iters):
         # 매번 새 묶음을 뽑아 장치로 옮긴다. 같은 묶음만 보면 그 묶음만 외우게 된다.
         xb, yb = get_batch("train")
@@ -185,7 +210,19 @@ def train():
         if step % train_config.eval_interval == 0:
             losses = estimate_loss()
             print(f"step {step}: train {losses['train']:.4f} · val {losses['val']:.4f}")
-            # 결과: step 0 → train 3.93 · val 3.94 / 300 → 0.68 · 0.68 / 600 → 0.24 · 0.24 / 900 → 0.19 · 0.19 / 2700 → 0.18 대 · 0.19 대 (묶음이 무작위라 소수 셋째 자리부터 실행마다 다르다)
+
+            # 8단계 조각 3: 시험 점수가 지금까지 중 가장 좋으면 그 순간의 모델을 저장한다.
+            # 외우기가 시작돼 나중에 나빠져도 파일에는 가장 좋았던 모델이 남는다 (8단계 문서 3-4).
+            # "지금까지의 최저" best_val 보다 낮을 때만.
+            if losses["val"] < best_val:
+                best_val = losses["val"]
+                save_model()
+                print(f"  저장 (검증 최저 {best_val:.4f})")
+
+    return best_val
+            # 결과: step 900 → train 2.05 · val 2.11 / 1800 → 1.75 · 1.86 / 3000 → 1.51 · 1.73 / 4800 → 1.21 · 1.64 (묶음이 무작위라 실행마다 조금 다르다)
+            #       검증이 매 점검마다 최저를 새로 써서 17번 모두 저장됨 · 마지막 저장 4800번째 검증 1.6435 · 혼자 돌려 249초
+            #       (7단계까지 토이 데이터: 2700 → 0.18 · 0.19 — 46종류를 외운 점수라 비교 대상이 아니다)
             # 둘이 거의 같다 — 대화가 학습용 · 검증용에 다 들어 있는 토이 데이터라서 (5단계). 외운 게 아니라는 증거는 못 된다
 
 
@@ -195,17 +232,22 @@ if __name__ == "__main__":
     # 모델 첫 숫자 덩어리가 어느 장치에 있는지 — device 와 같아야 한다
     print(next(model.parameters()).device)  # 기대: cuda:0 (cuda 의 0번 GPU)
     # 모델 안의 파라미터 총 개수 — 4단계에서 센 값과 같아야 한다
-    print(sum(p.numel() for p in model.parameters()))  # 기대: 827461
+    print(sum(p.numel() for p in model.parameters()))  # 기대: 5410012 (6층 · 256칸 · 글자 1244개)
     # 옵티마이저가 들고 있는 학습률 — TrainConfig 의 값과 같아야 한다
     print(optimizer.param_groups[0]["lr"])  # 기대: 0.0003
-    # 틀린 정도 — 학습 전이라 69글자를 찍어 맞히는 값 ln(69) 근처여야 한다
-    print(loss.item())  # 기대: 약 4.23 (4.1 ~ 4.6 — 묶음이 무작위라 실행마다 조금 다르다)
+    # 틀린 정도 — 학습 전이라 1244글자를 찍어 맞히는 값 ln(1244) 근처여야 한다
+    print(loss.item())  # 기대: 약 7.1 ~ 7.4 (ln(1244) ≈ 7.13 근처 — 묶음이 무작위라 실행마다 조금 다르다)
     # 펴기 전 · 후 모양 — (B, T, V) 가 (B*T, V) 로
-    print(logits.shape, logits_flat.shape, targets_flat.shape)  # 기대: [32,128,69] [4096,69] [4096]
+    print(logits.shape, logits_flat.shape, targets_flat.shape)  # 기대: [32,128,1244] [4096,1244] [4096]
     # 한 번 고친 뒤 같은 묶음으로 다시 잰 손실 — 위 loss 보다 작아야 한다
     print(loss_after.item())  # 기대: loss 보다 작은 값 (한 걸음만 갔으니 조금만)
-    # 반복 학습 — 손실이 4 대에서 내려가는지 본다
-    train()  # 기대: step 0 ~ 2700 까지 300 간격으로 10줄 · 값이 점점 작아짐
-    # 학습이 끝난 숫자를 파일로 적고, 불러온 모델과 점수를 비교한다
-    save_model()
-    print(check_saved_model())  # 기대: True (같은 점수)
+    # 반복 학습 — 점검마다 손실을 찍고, 검증 최저를 갱신할 때만 저장한다
+    best_val = train()
+    print(best_val)  # 가장 좋았던 검증 손실 — 결과: 1.6435155868530273 (4800번째)
+
+    # 학습이 끝난 model 은 "마지막" 숫자다. 파일에는 "가장 좋았던" 숫자가 있다 — 둘이 다를 수 있다.
+    # 파일의 숫자를 model 로 되돌려 이후 확인 · 사용이 가장 좋았던 모델로 이뤄지게 한다.
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device)["model"])
+
+    # 저장한 파일만으로 만든 모델과 점수를 비교한다
+    print(check_saved_model())  # 기대: True (같은 점수 — 파일의 설정으로 만든 빈 모델에 숫자가 그대로 들어감)

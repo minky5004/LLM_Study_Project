@@ -2,6 +2,7 @@
 
 GPT-2식으로 먼저 완성하고, 돌아가면 부품을 하나씩 현대식으로 교체한다 (4단계 문서 참고).
 지금은 조각 7까지: 토큰 임베딩 + 위치 임베딩 (몇 번째 글자인지 알려 주기) + multi-head attention + 블록 (FFN · 잔차 · LayerNorm) + 블록 쌓기 · 출력층.
+8단계 조각 3: dropout 을 실제로 켠다 — 임베딩 합 뒤 · 블록 안 attention · FFN 출력 뒤 (8단계 문서 3-3).
 """
 
 import math
@@ -47,6 +48,10 @@ class GPT(nn.Module):
         #   - 칸 수: 글자 줄에 "더할" 거라 글자 표와 칸 수가 같아야 한다 (이어 붙이면 줄이 길어져 뒤 부품이 전부 바뀐다)
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
         # 결과: self.wpe.weight.shape = torch.Size([128, 128]) — 줄 128개(자리) × 칸 128개
+
+        # 8단계 조각 3: 글자 줄 + 자리 줄을 합친 직후에 쓸 dropout (8단계 문서 3-3).
+        # 학습 모드일 때만 config.dropout 비율만큼 숫자를 무작위로 0 으로 지운다. 학습할 숫자가 없어 파라미터 수는 그대로다.
+        self.drop = nn.Dropout(config.dropout)
 
         # ---- 조각 7: 블록 쌓기 · 마지막 LayerNorm · 출력층 ----
 
@@ -96,6 +101,9 @@ class GPT(nn.Module):
         # 이어 붙이는 게 아니라 칸마다 더한다 (그래서 shape 가 그대로).
         x = tok_emb + pos_emb
         # 결과: (2, 5, 128) + (5, 128) -> (2, 5, 128). 번호 [0, 1, 0] 의 첫째 · 셋째 줄이 이제 서로 다름 (조각 1 에서는 같았다 — 실행 확인)
+
+        # 합친 줄에 dropout. 모양은 그대로 (B, T, n_embd) — 숫자 일부가 0 이 될 뿐이다. 점검 모드(eval)면 아무것도 안 한다.
+        x = self.drop(x)
 
         # 블록을 순서대로 통과시킨다. 앞 블록의 출력이 다음 블록의 입력이다. 블록은 모양을 안 바꾸므로 x 는 계속 (B, T, n_embd).
         for block in self.blocks:
@@ -290,13 +298,23 @@ class Block(nn.Module):
         self.ffn = FeedForward(config)
         # 결과: ln1 파라미터 256 · FFN 131712 · attention 66048 · ln2 256 -> 블록 하나 198272
 
+        # 8단계 조각 3: attention · FFN 의 출력을 잔차로 더하기 "전에" 지울 dropout (8단계 문서 3-3).
+        # 더하는 길(x 그대로)은 지우지 않는다 — 원래 정보는 그대로 흐르고, 부품이 새로 만든 몫만 일부 지운다.
+        # 학습할 숫자가 없어 하나를 두 곳에서 같이 써도 된다.
+        # 지울 비율은 1단계부터 설정 상자에 있던 config.dropout (7단계까지는 이름만 있고 쓰이지 않았다).
+        self.drop = nn.Dropout(config.dropout)
+        # 결과: 블록 하나 파라미터 198272 그대로 (dropout 은 학습할 숫자가 없다) · 모델 전체 827461 그대로
+
     def forward(self, x):
         # 잔차 연결: 부품의 출력에 입력을 그대로 더한다 (문서 6-3). 부품은 "바꿀 만큼" 만 만들면 된다.
         # 더하는 길에는 LayerNorm 이 없어서 입력의 원래 정보가 그대로 흐른다.
         # x + 부품(LayerNorm(x)) 가 한 묶음이고 attention 으로 한 번 · FFN 으로 한 번 한다 (문서 6-5).
         # 더하는 쪽 x 는 LayerNorm 을 안 거친 입력 그대로다. 더하려면 모양이 같아야 해서 (B, T, n_embd) + (B, T, n_embd).
-        x = x + self.attn(self.ln1(x))
-        x = x + self.ffn(self.ln2(x))
+        # 8단계 조각 3: 부품의 출력을 더하기 전에 dropout 을 한 번 거친다 — x + 지우기(부품(LayerNorm(x))).
+        # 두 줄 모두 부품의 출력을 __init__ 에서 만든 self.drop 으로 감싼다.
+        x = x + self.drop(self.attn(self.ln1(x)))
+        x = x + self.drop(self.ffn(self.ln2(x)))
+        # 결과 (8단계 조각 3): 6층 · 256칸 · dropout 0.2 로 5000번 학습 → 검증 손실 최저 1.6435 (dropout 0 이면 같은 크기에서 1.72 뒤 외우기)
         # 결과: 블록 출력 shape = torch.Size([2, 5, 128]) — 입력과 같은 모양
         #       attention 의 o_proj · FFN 의 fc2 를 0 으로 만들면 블록이 입력을 그대로 돌려준다 (allclose True — 잔차의 증거)
         #       마지막 글자만 바꿔도 앞 4글자의 출력은 그대로 True (블록 전체에서도 마스킹이 지켜진다)

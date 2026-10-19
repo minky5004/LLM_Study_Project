@@ -24,18 +24,26 @@ from llm.tokenizer import decode, encode, vocab_size
 # 학습 때와 같은 장치를 고른다 (6단계 문서 1-1).
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+# train.py 가 저장한 파일. 8단계 조각 3 부터 {"config": 모델 설정, "model": 학습한 숫자} 사전이 들어 있다.
+checkpoint_path = Path("checkpoints/model.pt")
+ckpt = torch.load(checkpoint_path, map_location=device)
+
 # 학습 때와 똑같은 설정으로 빈 모델을 만든다. 구조가 다르면 저장한 숫자가 들어갈 칸이 안 맞아 에러가 난다 (6단계 문서 5-2 ③).
-model_config = ModelConfig(vocab_size=vocab_size)
+# 설정은 파일에 적힌 것을 쓴다 — 학습 때 크기(6층 · 256칸)를 바꿔도 여기는 고칠 것이 없다 (8단계 문서 3-5).
+# ModelConfig(**사전): 사전의 이름표를 인자 이름으로 풀어 넣는다.
+model_config = ModelConfig(**ckpt["config"])
 model = GPT(model_config).to(device)
 
-# 6단계에서 저장한 파일. 학습한 숫자 827461개가 들어 있다.
-checkpoint_path = Path("checkpoints/model.pt")
+# 파일에 적힌 글자 종류 수와 지금 토크나이저의 글자 종류 수가 같아야 번호가 맞는다. 데이터를 다시 만들고 학습을 안 했으면 여기서 멈춘다.
+assert model_config.vocab_size == vocab_size, "모델 파일과 토크나이저의 글자 종류 수가 다르다 — train.py 로 다시 학습한다"
 
-# 파일의 숫자를 빈 모델에 채워 넣는다 (문서 1-1 ②). 파일은 torch.load 로 읽는다.
-model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-# 결과: <All keys matched successfully> — 저장한 숫자 827461개가 빈 모델 칸에 그대로 들어감
+# 파일의 숫자를 빈 모델에 채워 넣는다 (문서 1-1 ②).
+model.load_state_dict(ckpt["model"])
+# 결과: model_config = ModelConfig(vocab_size=1244, block_size=128, n_embd=256, n_head=8, n_layer=6, dropout=0.2) — 파일에 적힌 그대로
+#       <All keys matched successfully> — 숫자 5,410,012개가 빈 모델 칸에 그대로 들어감
 
 # 글을 만들 때는 dropout 을 꺼야 한다 — 모델을 점검 모드로 바꾼다 (6단계 문서 4-3 ③).
+# 8단계 조각 3 부터 dropout 이 실제로 켜져 있어서(0.2) 이 줄이 없으면 매번 숫자 20% 가 지워진 채 답한다 (8단계 문서 3-3 ③).
 model.eval()
 
 # 글을 이어 쓰게 할 시작 글. 학습 데이터와 같은 모양("사용자: ...\n봇:")이라 모델이 봇의 답을 이어 쓰게 된다.
@@ -47,26 +55,26 @@ prompt = "사용자: 배고파\n봇:"
 idx = torch.tensor([encode(prompt)], dtype=torch.long, device=device)
 # 결과: idx.shape = torch.Size([1, 11]) — 문장 1개 · 글자 11개 (시작 글 "사용자: 배고파" + 줄바꿈 + "봇:")
 
-# 점수만 재는 일이라 기록(no_grad)을 끈다 (6단계 문서 4-3 ②). 모델에 넣으면 글자 자리마다 69개 점수가 나온다.
+# 점수만 재는 일이라 기록(no_grad)을 끈다 (6단계 문서 4-3 ②). 모델에 넣으면 글자 자리마다 글자 종류 수만큼 점수가 나온다.
 with torch.no_grad():
     logits = model(idx)
-# 결과: logits.shape = torch.Size([1, 11, 69]) — 글자 자리 11개마다 69개 점수
+# 결과: logits.shape = torch.Size([1, 11, 1244]) — 글자 자리 11개마다 1244개 점수 (7단계 땐 69개)
 
 
 # ---- 조각 2: 다음 글자 하나 뽑기 ----
 
-# 점수 (1, 11, 69) 에서 맨 마지막 글자 자리의 69개 점수만 꺼낸다 (문서 2-1).
+# 점수 (1, 11, 1244) 에서 맨 마지막 글자 자리의 점수만 꺼낸다 (문서 2-1).
 # 시작 글을 끝까지 읽은 뒤에 올 글자가 궁금하니 마지막 자리다. 묶음 칸은 그대로 · 글자 자리는 맨 끝 · 점수는 전부.
 last = logits[:, -1, :]
-# 결과: last.shape = torch.Size([1, 69]) — 마지막 자리의 점수 69개
+# 결과: last.shape = torch.Size([1, 1244]) — 마지막 자리의 점수 1244개
 
-# 69개 점수를 확률로 바꾼다 — 0 이상 · 합이 1 (문서 2-2 ②). 69개가 늘어선 방향은 맨 끝 칸이다.
+# 점수를 확률로 바꾼다 — 0 이상 · 합이 1 (문서 2-2 ②). 점수가 늘어선 방향은 맨 끝 칸이다.
 probs = F.softmax(last, dim=-1)
-# 결과: probs.shape = torch.Size([1, 69]) · probs.sum() = 1.0000001 (소수 계산 오차) · 공백 확률 0.9999
+# 결과: probs.shape = torch.Size([1, 1244]) · probs.sum() = 1.0000004 (소수 계산 오차) · 공백 확률 0.99996
 
 # 확률대로 글자 번호 하나를 뽑는다 (문서 2-2 ③). 확률 0.7 인 글자는 10번 중 약 7번 뽑힌다.
 next_idx = torch.multinomial(probs, num_samples=1)
-# 결과: next_idx.shape = torch.Size([1, 1]) · decode 하면 ' ' (공백) — "봇:" 뒤는 학습 데이터 3000개가 전부 공백이라 3번 실행해도 같다
+# 결과: next_idx.shape = torch.Size([1, 1]) · decode 하면 ' ' (공백) — "봇:" 뒤는 학습 데이터 10,637개가 전부 공백이라 거의 늘 같다
 
 
 # ---- 조각 3: 한 글자씩 붙여 이어 쓰기 ----
@@ -82,9 +90,9 @@ def generate(model, idx, max_new_tokens):
         # block_size 는 모델을 만든 model_config 에서 꺼낸다 — 모델의 위치 표 크기와 같은 값이라 어긋날 일이 없다.
         idx_cond = idx[:, -model_config.block_size:]
 
-        logits = model(idx_cond)  # (1, T') -> (1, T', 69)  (T' = 잘린 뒤 길이, 최대 128)
-        last = logits[:, -1, :]  # (1, T', 69) -> (1, 69)  마지막 자리 점수 (조각 2)
-        probs = F.softmax(last, dim=-1)  # (1, 69) 점수 -> 확률
+        logits = model(idx_cond)  # (1, T') -> (1, T', 1244)  (T' = 잘린 뒤 길이, 최대 128)
+        last = logits[:, -1, :]  # (1, T', 1244) -> (1, 1244)  마지막 자리 점수 (조각 2)
+        probs = F.softmax(last, dim=-1)  # (1, 1244) 점수 -> 확률
         next_idx = torch.multinomial(probs, num_samples=1)  # (1, 1) 뽑힌 글자 번호
 
         # 뽑은 글자를 idx 뒤에 이어 붙인다 (문서 3-1). (1, T) + (1, 1) -> (1, T + 1)
@@ -92,7 +100,8 @@ def generate(model, idx, max_new_tokens):
         idx = torch.cat((idx, next_idx), dim=1)
     return idx
 # 결과: generate(model, idx, 40).shape = torch.Size([1, 51]) · 200글자 이어 써도 torch.Size([1, 211]) (128 넘어도 에러 없음)
-# 결과: 40글자 예 — 시작 글 뒤로 "봇: 아직 안 먹었어요" 다음 "사용자: 반가워" · "봇: 안녕하세요" 처럼 대화가 이어짐 (뽑기라 실행마다 다름)
+# 결과: 40글자 예 — 시작 글 뒤로 "봇: 울는 게 낫죠." 다음 "사용자: 우산 가고 싶어" · "봇: 부러워요." 처럼 대화가 이어짐 (뽑기라 실행마다 다름)
+#       대화 모양(사용자/봇 줄 · 빈 줄)은 지키지만 답이 질문과 안 맞는 일이 많다 — 아래 reply 결과 참고
 
 # ---- 조각 4: 대화해 보기 ----
 
@@ -111,10 +120,13 @@ def reply(model, text, max_new_tokens=60):
     # 학습 데이터에서 봇의 답은 한 줄이라 줄바꿈이 나오면 답이 끝난 것이다 (문서 4-2). 첫 줄바꿈 앞까지만 취한다.
     # split 은 글을 그 글자 기준으로 잘라 리스트로 돌려주고, [0] 은 맨 앞 조각이다.
     answer = new_text.split("\n")[0]
-    # 결과: new_text 가 " 물풀을 먹었어요" 다음 줄바꿈 둘 · "사용자: ..." 로 이어져도 answer 는 " 물풀을 먹었어요"
+    # 결과: new_text 가 " 공부가 되길 바랍니다." 다음 줄바꿈 둘 · "사용자: ..." 로 이어져도 answer 는 " 공부가 되길 바랍니다."
 
     return answer.strip()  # "봇:" 바로 뒤가 공백이라 답이 공백으로 시작한다 — 앞뒤 공백을 걷어 낸다
-    # 결과: reply(model, "배고파") = '물풀을 먹었어요' (줄바꿈 없음 · 뽑기라 실행마다 다름) · "hello" 는 encode 에서 KeyError -> chat() 이 "모르는 글자가 있어요" 출력
+    # 결과 (8단계 조각 3 · 6층 · 256칸 · 검증 1.64 모델 · torch.manual_seed(1)):
+    #   시험 망쳤어 → 공부가 되길 바랍니다. · 날씨 좋아 → 좀 더 좋은 운동 하세요. · 배고파 → 로맨틱하네요. · 면허 따는 중 → 얼굴을 피해주세요.
+    #   문장 모양은 자연스러워졌지만 질문과 안 맞는 답이 많다 · "hello" 는 encode 에서 KeyError('h') -> chat() 이 "모르는 글자가 있어요" 출력
+    #   (7단계 토이 모델: 배고파 → 물풀을 먹었어요 — 질문 15종류를 외운 답)
 
 
 def chat():
@@ -126,7 +138,7 @@ def chat():
             break
         try:
             print("봇:", reply(model, text))
-        except KeyError:  # encode 가 학습 글에 없는 글자(69개 밖)를 만나면 KeyError — 영어 · 느낌표 등
+        except KeyError:  # encode 가 학습 글에 없는 글자(1244개 밖)를 만나면 KeyError — 영어 · 느낌표 등
             print("봇: 모르는 글자가 있어요")
 
 
@@ -134,8 +146,8 @@ def chat():
 if __name__ == "__main__":
     print(idx.shape)  # 기대: torch.Size([1, 11]) — 문장 1개 · 글자 11개 ("사용자: 배고파\n봇:")
     print(decode(idx[0].tolist()))  # 기대: 시작 글이 그대로 — 번호로 바꿨다 되돌려 제자리인지 확인
-    print(logits.shape)  # 기대: torch.Size([1, 11, 69]) — 글자 자리마다 69개 점수
-    print(last.shape)  # 기대: torch.Size([1, 69]) — 마지막 자리의 점수 69개
+    print(logits.shape)  # 기대: torch.Size([1, 11, 1244]) — 글자 자리마다 1244개 점수
+    print(last.shape)  # 기대: torch.Size([1, 1244]) — 마지막 자리의 점수 1244개
     print(probs.sum().item())  # 기대: 1.0 근처 — 확률은 합이 1
     print(next_idx.shape)  # 기대: torch.Size([1, 1]) — 뽑힌 글자 번호 1개
     print(repr(decode(next_idx[0].tolist())))  # 기대: ' ' (공백) — "봇:" 뒤는 공백이 거의 확실
