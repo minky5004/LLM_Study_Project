@@ -8,6 +8,8 @@ BPE(Byte Pair Encoding — 자주 붙어 나오는 두 조각을 새 번호 하�
 다 만든 뒤 tokenizer.py 의 encode · decode 를 이 파일 것으로 바꿔 끼운다 (이름 · 사용법은 그대로).
 """
 
+import json
+
 from llm.tokenizer import train_text
 
 
@@ -272,6 +274,38 @@ if __name__ == "__main__":
     #       '😀' [240, 159, 152, 128] '😀'
     #       '오늘 뭐해' [236, 152, 164, 235, 138, 152, 257, 173, 144, 262, 180] '오늘 뭐해'
     #       <- 13바이트 -> 11칸 · 257 = (32, 235) 공백 + '뭐' 첫 바이트 · 262 = (237, 149) '해' 의 앞 두 바이트 — 아직 글자 경계와 안 맞는 조각
+
+
+
+# ---- 조각 6: 합치기 표 저장 · 불러오기 ----
+
+def save(merges, path):
+    """합치기 표를 JSON 파일로 저장한다 (6-5).  쌍만 합친 순서대로 — 새 번호는 줄 순서로 되살아난다.
+
+    파일 안 모양) [[32, 236], [32, 235], ...]  <- 0째 줄 = 256번 · 1째 줄 = 257번 · ...
+    """
+    # list(사전) = 사전의 키만 넣은 순서대로 꺼낸 리스트 — [(32, 236), (32, 235), ...]
+    # json.dump(값, 파일) = 값을 JSON 글로 바꿔 파일에 쓴다 · 튜플은 [32, 236] 같은 리스트로 바뀐다
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(list(merges), f)
+
+
+def load(path, vocab_size):
+    """저장한 합치기 표를 불러와 vocab_size 에 맞게 앞부분만 쓴다 (6-1).
+
+    예) 4096 표 파일에서 load(경로, 1024) -> 앞 768줄만 담은 {(앞, 뒤): 새 번호} 사전
+    """
+    with open(path, encoding="utf-8") as f:
+        pairs = json.load(f)  # 파일의 JSON 글 -> 파이썬 값.  [[32, 236], [32, 235], ...] (쌍이 리스트로 돌아온다)
+
+    # 표는 앞에서부터 쌓였으니 앞부분이 곧 작은 표다 (6-1).
+    # 번호 표를 vocab_size 장으로 만들려면 바이트 256장 외에 vocab_size - 256 줄 — 조각 4 의 num_merges 와 같은 계산 (1024 면 768줄)
+    pairs = pairs[:vocab_size - 256]
+
+    # enumerate(pairs) = (몇째 줄, 쌍) 을 0째부터 하나씩 꺼낸다
+    # tuple(p): JSON 이 리스트로 바꿔 놓은 쌍을 사전 키로 쓸 수 있게 되돌린다 (6-6)
+    # i + 256: i 째 줄의 새 번호 — 0째 줄이 256번 · 조각 4 의 idx 와 같은 계산 (6-5)
+    return {tuple(p): i + 256 for i, p in enumerate(pairs)}
 
 
 # ---- 직접 실행 결과 (uv run python -m llm.bpe) ----
