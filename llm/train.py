@@ -10,18 +10,21 @@
 
 # asdict: dataclass(설정 상자)를 {이름: 값} 사전으로 바꾸는 함수. 모델 파일에 설정을 같이 넣을 때 쓴다 (8단계 문서 3-5).
 from dataclasses import asdict
+import json
 from pathlib import Path
+import subprocess
+import time
 
 import torch
 import torch.nn.functional as F
 
 from llm.config import ModelConfig, TrainConfig
-from llm.dataset import get_batch, val_data
+from llm.dataset import get_batch, train_data, val_data
 from llm.model import GPT
 
 # 주의: tokenizer 를 import 하면 그 모듈 최상위가 실행되어 train.txt 를 읽는다. 프로젝트 루트에서 `-m` 으로 실행해야 경로가 맞는다.
 # vocab_size: 토크나이저가 글에서 센 글자 종류 수. 5단계에서 한 것처럼 모델 설정에 넘겨 config.py 의 손으로 적은 69 에 기대지 않는다.
-from llm.tokenizer import val_text, vocab_size
+from llm.tokenizer import train_text, val_text, vocab_size
 
 
 # ---- 조각 1: 장치 · 모델 · 옵티마이저 준비 ----
@@ -182,6 +185,11 @@ def check_saved_model():
         # 결과: True — 파일만으로 만든 모델의 점수가 (가장 좋았을 때로 되돌린) 학습한 모델과 한 칸도 다르지 않다
 
 
+# 9단계 마무리: 점검 때마다 손실을 여기 모아 두었다가 학습이 끝나면 파일로 남긴다 (아래 save_log).
+# 화면 출력은 실행이 끝나면 사라져서, 나중에 실험끼리 그래프로 비교하려면 숫자가 파일에 있어야 한다.
+history = []  # [{"step": 0, "train": 6.27, "val": 6.28}, ...]
+
+
 def train():
     """묶음 뽑기 → 점수 → 손실 → 고치기를 max_iters 번 되풀이한다 (문서 3-4).
 
@@ -212,6 +220,7 @@ def train():
         if step % train_config.eval_interval == 0:
             losses = estimate_loss()
             print(f"step {step}: train {losses['train']:.4f} · val {losses['val']:.4f}")
+            history.append({"step": step, "train": losses["train"], "val": losses["val"]})  # 파일로 남길 한 줄
 
             # 8단계 조각 3: 시험 점수가 지금까지 중 가장 좋으면 그 순간의 모델을 저장한다.
             # 외우기가 시작돼 나중에 나빠져도 파일에는 가장 좋았던 모델이 남는다 (8단계 문서 3-4).
@@ -226,6 +235,35 @@ def train():
             #       검증이 매 점검마다 최저를 새로 써서 17번 모두 저장됨 · 마지막 저장 4800번째 검증 1.6435 · 혼자 돌려 249초
             #       (7단계까지 토이 데이터: 2700 → 0.18 · 0.19 — 46종류를 외운 점수라 비교 대상이 아니다)
             # 둘이 거의 같다 — 대화가 학습용 · 검증용에 다 들어 있는 토이 데이터라서 (5단계). 외운 게 아니라는 증거는 못 된다
+
+
+def save_log(best_val, seconds):
+    """이번 학습의 설정 · 점검마다의 손실 · 요약을 JSON 파일 하나로 남긴다 — 나중에 실험끼리 그래프로 비교하려고.
+
+    파일: checkpoints/logs/<날짜-시각>-v<vocab_size>.json (리포 밖 — checkpoints/ 는 .gitignore)
+    글자당 손실로 바꾸는 데 필요한 토큰 수 · 글자 수도 같이 적는다 (9단계 문서 7-5) — 그래프 때 다시 encode 하지 않게.
+    """
+    log_dir = checkpoint_path.parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / f"{time.strftime('%Y-%m-%d-%H%M')}-v{vocab_size}.json"
+    # 어느 코드로 돌렸는지 — git 의 지금 커밋 번호 (git 이 없으면 빈칸)
+    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    best = min(history, key=lambda h: h["val"])  # 검증 최저였던 점검 한 줄
+    log = {
+        "commit": commit,
+        "model_config": asdict(model_config),
+        "train_config": asdict(train_config),
+        "params": sum(p.numel() for p in model.parameters()),
+        "train_tokens": len(train_data), "train_chars": len(train_text),
+        "val_tokens": len(val_data), "val_chars": len(val_text),
+        "seconds": round(seconds, 1),  # 학습 루프만 (import 때의 encode 는 빠짐)
+        "best_step": best["step"], "best_val": best_val,
+        "best_val_per_char": best_val * len(val_data) / len(val_text),
+        "history": history,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(log, f, ensure_ascii=False, indent=1)  # ensure_ascii=False: 한글을 \uXXXX 가 아니라 글자 그대로
+    return path
 
 
 # 직접 실행했을 때만 확인용 출력 (uv run python -m llm.train)
@@ -244,7 +282,9 @@ if __name__ == "__main__":
     # 한 번 고친 뒤 같은 묶음으로 다시 잰 손실 — 위 loss 보다 작아야 한다
     print(loss_after.item())  # 기대: loss 보다 작은 값 (한 걸음만 갔으니 조금만)
     # 반복 학습 — 점검마다 손실을 찍고, 검증 최저를 갱신할 때만 저장한다
+    t = time.perf_counter()
     best_val = train()
+    print(save_log(best_val, time.perf_counter() - t))  # 남긴 로그 파일 경로
     print(best_val)  # 가장 좋았던 검증 손실 — 결과: 2.301997423171997 (4500번째 · 토큰당) · 8단계 글자 단위 1.6435155868530273 (4800번째)
 
     # 9단계 조각 7: 토큰 크기가 다른 토크나이저끼리 비교할 글자당 손실 (9단계 문서 7-5).
