@@ -86,9 +86,9 @@ next_idx = torch.multinomial(probs, num_samples=1)
 # 위 조각 2 는 한 걸음을 풀어서 보여 준 것이고, 아래 함수 안의 같은 줄들이 실제로 되풀이된다.
 @torch.no_grad()  # 점수만 재는 일이라 기록을 끈다 (조각 1 의 with torch.no_grad() 와 같은 일)
 def generate(model, idx, max_new_tokens, stop_idx=None):
-    """idx (1, T) 뒤에 글자를 max_new_tokens 개 이어 붙여 (1, T + max_new_tokens) 를 돌려준다.
+    """idx (1, T) 뒤에 토큰을 max_new_tokens 개 이어 붙여 (1, T + max_new_tokens) 를 돌려준다.
 
-    stop_idx 를 주면 그 번호의 글자가 뽑히는 순간 멈춘다 (8단계 문서 4-1) — 그 글자까지 붙인 채로 돌려준다.
+    stop_idx 를 주면 그 번호의 토큰이 뽑히는 순간 멈춘다 (8단계 문서 4-1) — 그 토큰까지 붙인 채로 돌려준다.
     주지 않으면(None) 예전처럼 늘 max_new_tokens 개를 만든다. 아래 확인용 출력의 (1, 51) · (1, 211) 은 이 경우다.
     """
     for _ in range(max_new_tokens):
@@ -97,10 +97,10 @@ def generate(model, idx, max_new_tokens, stop_idx=None):
         # block_size 는 모델을 만든 model_config 에서 꺼낸다 — 모델의 위치 표 크기와 같은 값이라 어긋날 일이 없다.
         idx_cond = idx[:, -model_config.block_size:]
 
-        logits = model(idx_cond)  # (1, T') -> (1, T', 1244)  (T' = 잘린 뒤 길이, 최대 128)
-        last = logits[:, -1, :]  # (1, T', 1244) -> (1, 1244)  마지막 자리 점수 (조각 2)
-        probs = F.softmax(last, dim=-1)  # (1, 1244) 점수 -> 확률
-        next_idx = torch.multinomial(probs, num_samples=1)  # (1, 1) 뽑힌 글자 번호
+        logits = model(idx_cond)  # (1, T') -> (1, T', 1024)  (T' = 잘린 뒤 길이, 최대 128)
+        last = logits[:, -1, :]  # (1, T', 1024) -> (1, 1024)  마지막 자리 점수 (조각 2)
+        probs = F.softmax(last, dim=-1)  # (1, 1024) 점수 -> 확률
+        next_idx = torch.multinomial(probs, num_samples=1)  # (1, 1) 뽑힌 토큰 번호
 
         # 뽑은 글자를 idx 뒤에 이어 붙인다 (문서 3-1). (1, T) + (1, 1) -> (1, T + 1)
         # dim=1 은 글자 자리가 늘어선 방향(가로). dim=0 이면 묶음 칸 쪽으로 쌓여 문장이 2개가 된다.
