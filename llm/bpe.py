@@ -5,13 +5,15 @@ BPE(Byte Pair Encoding — 자주 붙어 나오는 두 조각을 새 번호 하�
 가장 작은 조각인 바이트 256종에서 출발해, 자주 나오는 묶음을 하나씩 합쳐 번호 표를 키운다.
 바이트로 못 나타내는 글자는 없으니 거부도 없다.
 
-다 만든 뒤 tokenizer.py 의 encode · decode 를 이 파일 것으로 바꿔 끼운다 (이름 · 사용법은 그대로).
+조각 7 에서 tokenizer.py 의 encode · decode 를 이 파일 것으로 바꿔 끼웠다 (이름 · 사용법은 그대로).
 """
 
 import json
 import re
 
-from llm.tokenizer import train_text
+# 학습용 글은 글자 단위 토크나이저 파일에서 — tokenizer.py 가 이 파일을 가져오니, 여기서 tokenizer.py 를 가져오면
+# 서로 가져오기(순환 import)로 ImportError 가 난다 (9단계 문서 7-3)
+from llm.char_tokenizer import train_text
 
 
 # ---- 조각 1: 글 <-> 바이트 번호 ----
