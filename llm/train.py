@@ -5,10 +5,13 @@
 학습한 숫자 저장 · 불러와 확인 (문서 5-1 ~ 5-2).
 8단계 조각 3: 모델 키우기(6층 · 256칸) · dropout 0.2 · 검증 손실이 가장 좋을 때만 저장 · 설정도 같이 저장 (8단계 문서 3-1 ~ 3-5).
 9단계 조각 7: 토크나이저가 BPE 1024 로 바뀜 · 맨 아래에 글자당 손실 (9단계 문서 7-5).
+10단계 조각 1: 시드 고정 · 시드와 실험 이름을 명령줄로 받아 로그에 (10단계 문서 1-1 ~ 1-4).
   줄 사이 `# 결과:` 중 1244 · 5,410,012 같은 값은 8단계(글자 단위) 기록 · 9단계 값은 파일 끝 블록에.
 """
 
 # asdict: dataclass(설정 상자)를 {이름: 값} 사전으로 바꾸는 함수. 모델 파일에 설정을 같이 넣을 때 쓴다 (8단계 문서 3-5).
+# argparse: 실행 명령 뒤에 붙인 값(--seed 2 같은 명령줄 인자)을 읽어 주는 표준 모듈 (10단계 문서 1-4)
+import argparse
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -44,6 +47,22 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # n_head=8: 256 칸을 8 갈래로 쪼개 갈래마다 32칸 (지금까지와 같은 갈래 크기).
 model_config = ModelConfig(vocab_size=vocab_size, n_layer=6, n_embd=256, n_head=8, dropout=0.2)
 train_config = TrainConfig(max_iters=5000)
+
+# 10단계 조각 1: 시드 · 실험 이름을 명령줄로 받는다 (10단계 문서 1-4).
+#   예) uv run python -m llm.train --seed 2 --label bpe1024
+#   아무것도 안 붙이면 기본값 — 시드 1 · 이름 없음(로그 파일 이름에 v<번호 수> 를 대신 씀)
+parser = argparse.ArgumentParser()
+# 명령줄에 쓴 값은 전부 글자("2")로 들어온다 — type=int 로 정수로 바꿔 읽는다 (torch.manual_seed 가 정수를 받으니)
+parser.add_argument("--seed", type=int, default=1)
+parser.add_argument("--label", default="")  # 실험 이름 — 글자 그대로 쓰니 타입을 안 적는다 (기본이 글자)
+args = parser.parse_args()  # 명령줄을 읽어 args.seed · args.label 로 꺼낼 수 있게
+# 결과: --seed 1 --label bpe1024 → args.seed = 1 (정수) · args.label = "bpe1024"
+
+# 난수 출발 숫자 고정 (10단계 문서 1-2). 아래 GPT(...) 가 모델의 처음 숫자를 난수로 채우니 반드시 그 전에.
+# 이 한 줄로 처음 숫자 · 묶음 뽑기(get_batch) · dropout 이 실행마다 같아진다 — CPU · GPU 둘 다.
+# 숫자를 코드에 박지 않고 명령줄의 시드를 쓴다 — 박으면 로그의 seed 칸만 바뀌고 학습은 늘 같은 시드로 돈다
+torch.manual_seed(args.seed)
+# 결과: 시드 1 로 두 번 학습 → 학습 전 손실 7.174860954284668 · 점검 17번의 손실 · 검증 최저 2.2845938205718994 가 두 번 다 끝자리까지 같음
 
 # 모델을 만들어 장치로 옮긴다 (문서 1-2).
 # 모델의 숫자(파라미터)가 GPU 메모리에 있어야 GPU 가 계산할 수 있다. 한 번 옮기면 끝이다.
@@ -240,16 +259,18 @@ def train():
 def save_log(best_val, seconds):
     """이번 학습의 설정 · 점검마다의 손실 · 요약을 JSON 파일 하나로 남긴다 — 나중에 실험끼리 그래프로 비교하려고.
 
-    파일: checkpoints/logs/<날짜-시각>-v<vocab_size>.json (리포 밖 — checkpoints/ 는 .gitignore)
+    파일: checkpoints/logs/<날짜-시각>-<실험 이름>-s<시드>.json (리포 밖 — checkpoints/ 는 .gitignore)
     글자당 손실로 바꾸는 데 필요한 토큰 수 · 글자 수도 같이 적는다 (9단계 문서 7-5) — 그래프 때 다시 encode 하지 않게.
     """
     log_dir = checkpoint_path.parent / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    path = log_dir / f"{time.strftime('%Y-%m-%d-%H%M')}-v{vocab_size}.json"
+    # 파일 이름에 실험 이름 · 시드 — 예) 2026-10-23-0930-bpe1024-s2.json (이름이 없으면 v1024 처럼 번호 수)
+    path = log_dir / f"{time.strftime('%Y-%m-%d-%H%M')}-{args.label or f'v{vocab_size}'}-s{args.seed}.json"
     # 어느 코드로 돌렸는지 — git 의 지금 커밋 번호 (git 이 없으면 빈칸)
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
     best = min(history, key=lambda h: h["val"])  # 검증 최저였던 점검 한 줄
     log = {
+        "label": args.label, "seed": args.seed,  # 10단계: 어느 실험의 몇 번째 시드인지 (그래프 띠 · 여정 요약에 씀)
         "commit": commit,
         "model_config": asdict(model_config),
         "train_config": asdict(train_config),
@@ -316,3 +337,14 @@ if __name__ == "__main__":
 # 학습 · 검증 차이 1.47 vs 2.30 (4800번째) — 8단계 1.21 vs 1.64 보다 벌어짐.
 #   같은 5000번 × 32줄 × 128칸 = 토큰 2,048만 개를 봐도 토큰이 커서 글을 더 많이 본다 — 학습용 글 전체를 약 67바퀴 · 8단계는 약 50바퀴 (계산)
 #   그래서 같은 횟수에 더 일찍 외우는 쪽으로 간다 (추정 — 횟수를 줄여 재지는 않음)
+
+# ---- 10단계 조각 1 · 시드 고정 확인 (uv run python -m llm.train --seed 1 --label bpe1024 를 두 번) ----
+# 화면 출력이 로그 파일 이름 한 줄 빼고 전부 같음 · 로그 history 17줄이 숫자 끝자리까지 같음 (재현됨)
+# 학습 전 손실 7.1749 → 한 걸음 뒤 6.7397 (9단계는 시드 없이 7.03 → 6.63)
+# step 0: train 6.3390 · val 6.3484
+# step 300: train 3.2338 · val 3.2947
+# step 4500: train 1.5528 · val 2.3131
+# step 4800: train 1.4766 · val 2.2846    <- 검증 최저 (저장) · 9단계 실행은 4500번째 2.3020 이 최저였음
+# 2.2845938205718994 · 글자당 1.6984405660613957 · True
+# 학습 루프 시간 419.6초 · 366.4초 — 손실은 같아도 시간은 실행마다 다르다 (그래프 3 속도 비교 때 주의)
+# 로그: checkpoints/logs/2026-10-23-1152-bpe1024-s1.json · 2026-10-23-1200-bpe1024-s1.json (조각 2 의 시드 1 기록으로도 씀)
