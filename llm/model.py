@@ -3,6 +3,7 @@
 GPT-2식으로 먼저 완성하고, 돌아가면 부품을 하나씩 현대식으로 교체한다 (4단계 문서 참고).
 지금은 조각 7까지: 토큰 임베딩 + 위치 임베딩 (몇 번째 글자인지 알려 주기) + multi-head attention + 블록 (FFN · 잔차 · LayerNorm) + 블록 쌓기 · 출력층.
 8단계 조각 3: dropout 을 실제로 켠다 — 임베딩 합 뒤 · 블록 안 attention · FFN 출력 뒤 (8단계 문서 3-3).
+10단계 조각 3: LayerNorm 13곳을 직접 짠 RMSNorm 으로 교체 (10단계 문서 3-1 ~ 3-4).
 """
 
 import math
@@ -64,8 +65,9 @@ class GPT(nn.Module):
 
         # 마지막 LayerNorm (문서 7-2). 블록은 부품 "앞" 에서 줄을 맞추기 때문에 마지막 블록의 출력은 맞춰지지 않은 채 나온다.
         # 출력층에 넣기 전에 한 번 더 맞춘다. 맞출 줄 한 개의 칸 수(맨 뒤 축)가 n_embd 라서 괄호에 n_embd 를 적는다.
-        self.ln_f = nn.LayerNorm(config.n_embd)
-        # 결과: 파라미터 256 = gamma 128 + beta 128 · 장부에 ln_f.weight · ln_f.bias 로 올라간다 (실행 확인)
+        # 10단계 조각 3: LayerNorm 대신 RMSNorm — 이름 ln_f 는 그대로 둔다 (부르는 쪽 코드를 안 바꾸려고)
+        self.ln_f = RMSNorm(config.n_embd)
+        # 결과 (LayerNorm 때): 파라미터 256 = gamma 128 + beta 128 · 장부에 ln_f.weight · ln_f.bias 로 올라간다 (실행 확인)
 
         # 출력층 (문서 7-3). 글자 줄(n_embd 칸)을 "글자 종류마다 점수 한 칸" 짜리 줄로 바꾼다.
         # 들어오는 칸 수는 글자 줄의 n_embd · 나가는 칸 수는 글자 종류 수 vocab_size (칸 하나 = 글자 하나의 점수).
@@ -279,6 +281,37 @@ class FeedForward(nn.Module):
         return x
 
 
+# ---- 10단계 조각 3: RMSNorm — 크기만 맞추는 LayerNorm (10단계 문서 3-1 ~ 3-4) ----
+
+class RMSNorm(nn.Module):
+    """글자마다 줄의 크기(제곱 평균의 제곱근)를 1 근처로 맞추고 칸마다 gamma 를 곱한다. shape 그대로 (..., dim) -> (..., dim).
+
+    LayerNorm 과 다른 점: 평균 빼기 · beta 더하기가 없다 (문서 3-1). 그래서 숫자가 dim 개(gamma 만) — LayerNorm 은 2 x dim.
+    """
+
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        # 0 으로 나누지 않게 제곱 평균에 더할 아주 작은 수 (문서 3-2 ④). nn.RMSNorm 과 비교할 때 같은 값을 넘긴다.
+        self.eps = eps
+        # gamma: 칸마다 곱할 학습 숫자. nn.Parameter 로 감싸야 장부에 올라가 학습된다 (이름 weight 는 nn.RMSNorm 과 같게).
+        # 처음엔 "곱해도 그대로" 가 되게 1 로 채운다 (문서 3-3) — LayerNorm 의 gamma 와 같은 출발
+        self.weight = nn.Parameter(torch.ones(dim))
+        # 결과: RMSNorm(128) 파라미터 128 (gamma 만 · LayerNorm 은 gamma + beta 256)
+
+    def forward(self, x):
+        # 칸마다 제곱 → 맨 뒤 축(칸 dim 개)을 따라 평균. shape (B, T, dim) -> (B, T, 1)
+        # keepdim=True: 평균을 낸 축을 크기 1 로 남긴다 — 남겨야 (B, T, dim) 을 (B, T, 1) 로 나눌 때 칸마다 같은 값으로 나눠진다
+        ms = x.pow(2).mean(dim=-1, keepdim=True)
+        # 결과: (2, 5, 128) 을 넣으면 ms.shape = (2, 5, 1) · keepdim=False 면 (2, 5) 라 다음 줄 나누기가
+        #       RuntimeError (size of tensor a (128) must match the size of tensor b (5)) — 맨 뒤 축끼리 맞추려 해서
+        # 제곱 평균에 eps 를 더하고 제곱근 → 그 값으로 나눈다 (문서 3-2). shape (B, T, dim) / (B, T, 1) -> (B, T, dim)
+        # 숫자 1e-6 을 박지 않고 self.eps — RMSNorm(dim, eps=1e-5) 처럼 만들 때 넘긴 값이 쓰이게
+        x = x / torch.sqrt(ms + self.eps)
+        # 칸마다 gamma 를 곱한다. (B, T, dim) * (dim,) — 맨 뒤 축끼리 맞춰 모든 글자에 같은 gamma
+        return x * self.weight
+        # 결과: RMSNorm(2)([[3., -4.]]) = [[0.8485, -1.1314]] — RMS 3.54 로 나눔 · 부호와 비율 그대로 (문서 3-2 ③ 의 예)
+
+
 class Block(nn.Module):
     """트랜스포머 블록 하나: attention 과 FFN 을 LayerNorm · 잔차로 묶는다. shape (B, T, n_embd) -> (B, T, n_embd).
 
@@ -292,11 +325,12 @@ class Block(nn.Module):
         # LayerNorm: 글자마다 줄을 평균 0 · 퍼짐 1 근처로 맞춘다 (문서 6-4). 괄호에는 맞출 줄의 칸 수(맨 뒤 축)를 적는다.
         # attention 앞 · FFN 앞에 따로 둔다 — 안에 학습되는 숫자(gamma · beta)가 각자 있어서 둘은 다른 층이다.
         # 글자 하나의 줄이 n_embd 칸이라 두 곳 모두 n_embd 를 넣는다. 안에 칸마다 gamma · beta 가 있어 파라미터가 128 x 2 = 256 이다.
-        self.ln1 = nn.LayerNorm(config.n_embd)
+        # 10단계 조각 3: 두 곳 모두 RMSNorm 으로 — 이름 ln1 · ln2 는 그대로 (문서 3-4 ③)
+        self.ln1 = RMSNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
-        self.ln2 = nn.LayerNorm(config.n_embd)
+        self.ln2 = RMSNorm(config.n_embd)
         self.ffn = FeedForward(config)
-        # 결과: ln1 파라미터 256 · FFN 131712 · attention 66048 · ln2 256 -> 블록 하나 198272
+        # 결과: ln1 파라미터 128 · FFN 131712 · attention 66048 · ln2 128 -> 블록 하나 198016 (LayerNorm 때 256 · 256 -> 198272)
 
         # 8단계 조각 3: attention · FFN 의 출력을 잔차로 더하기 "전에" 지울 dropout (8단계 문서 3-3).
         # 더하는 길(x 그대로)은 지우지 않는다 — 원래 정보는 그대로 흐르고, 부품이 새로 만든 몫만 일부 지운다.
@@ -343,7 +377,7 @@ if __name__ == "__main__":
     # 조각 7 확인: 모델 전체. 번호 (B, T) 가 들어가 글자 종류마다 점수 한 칸씩 (B, T, vocab_size) 이 나온다
     logits = model(idx)
     print(logits.shape)  # 기대: torch.Size([2, 5, 69])
-    # 기대: 827461 = 임베딩 25216 + 블록 198272 x 4 + ln_f 256 + 출력층 8901 (128 x 69 + 69)
+    # 기대: 826309 = 임베딩 25216 + 블록 198016 x 4 + ln_f 128 + 출력층 8901 (128 x 69 + 69) · LayerNorm 때 827461 (-1152 = 128 x 9곳)
     print(sum(p.numel() for p in model.parameters()))
 
     # 조각 3 확인: 위치까지 섞은 out 을 attention 부품에 넣어 Q / K / V 를 만든다
@@ -364,7 +398,7 @@ if __name__ == "__main__":
     block = Block(config)
     z = block(out)
     print(z.shape)  # 기대: torch.Size([2, 5, 128])
-    # 기대: 198272 = attention 66048 + LayerNorm 256 x 2 + FFN 131712 (128 x 512 + 512 + 512 x 128 + 128)
+    # 기대: 198016 = attention 66048 + RMSNorm 128 x 2 + FFN 131712 (128 x 512 + 512 + 512 x 128 + 128) · LayerNorm 때 198272
     print(sum(p.numel() for p in block.parameters()))
 
     # 잔차 확인: 부품의 마지막 Linear(o_proj · fc2)를 0 으로 만들면 부품 출력이 0 이라 블록은 입력을 그대로 돌려줘야 한다
@@ -379,17 +413,32 @@ if __name__ == "__main__":
     ffn = FeedForward(config)
     print(torch.allclose(ffn(out)[:, :-1], ffn(out2)[:, :-1]))  # 기대: True
 
+    # 10단계 조각 3 확인: 직접 짠 RMSNorm 이 내장 nn.RMSNorm 과 같은 값을 내는가 (문서 3-4)
+    mine = RMSNorm(config.n_embd)
+    ref = nn.RMSNorm(config.n_embd, eps=1e-6)  # eps 를 같게 — 안 주면 nn.RMSNorm 은 다른 기본값을 쓴다
+    with torch.no_grad():
+        mine.weight.copy_(torch.randn(config.n_embd))  # gamma 가 1 이 아니어도 같은지 보려고 무작위로
+        ref.weight.copy_(mine.weight)  # 둘에 같은 gamma
+    print(torch.allclose(mine(out), ref(out)))  # 기대: True
+    print(sum(p.numel() for p in mine.parameters()))  # 기대: 128 (gamma 만 — LayerNorm 은 256)
+    # 크기 맞추기 확인: gamma 가 1 이면 글자마다 줄의 제곱 평균이 1 근처
+    print(RMSNorm(config.n_embd)(out).pow(2).mean(dim=-1)[0])  # 기대: 1 근처 5개
+
 # ---- 직접 실행 결과 (uv run python -m llm.model) ----
 # torch.Size([2, 5])
 # torch.Size([2, 5, 128])
 # 25216
 # torch.Size([2, 5, 69])
-# 827461
+# 826309                     <- 10단계 조각 3 (RMSNorm) · LayerNorm 때 827461
 # torch.Size([2, 5, 128])
 # 66048
 # True
 # False
 # torch.Size([2, 5, 128])
-# 198272
+# 198016                     <- LayerNorm 때 198272
 # True
 # True
+# True                       <- 직접 짠 RMSNorm == nn.RMSNorm (allclose · 무작위 gamma)
+# 128
+# tensor([1.0000, 1.0000, 1.0000, 1.0000, 1.0000], grad_fn=<SelectBackward0>)  <- 글자 5개 모두 제곱 평균 1
+# 학습 크기(6층 · 256칸 · BPE 1024) 파라미터 5,293,824 — LayerNorm 때 5,297,152 (-3,328 = 256 x 13곳 · -0.06%)
