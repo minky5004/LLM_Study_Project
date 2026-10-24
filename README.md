@@ -13,11 +13,12 @@
 
 1. `config.py` — 모델·학습 하이퍼파라미터
 2. 토이 데이터셋 — 아주 작은 학습용 텍스트
-3. `tokenizer.py` — 텍스트 ↔ 토큰 변환
+3. `tokenizer.py` — 텍스트 ↔ 토큰 변환 · 지금은 BPE 1024 · 글자 단위 원본은 `char_tokenizer.py`
 4. `model.py` — 트랜스포머 아키텍처 (임베딩 → attention → FFN → 조립)
 5. `dataset.py` — 데이터 로딩·배치
 6. `train.py` — 학습 루프
 7. `generate.py` — 추론·생성
+8. `bpe.py` · `bpe_vocab.py` — BPE 토크나이저 · 번호 표 크기 1024 · 2048 · 4096 비교
 
 각 단계는 코드를 같이 쓰면서 진행 — 한 번에 완성해서 던지지 않음.
 
