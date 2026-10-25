@@ -167,6 +167,49 @@ def apply_rope(t, cos, sin):
     return torch.stack([new_a, new_b], dim=-1).flatten(-2)
 
 
+def manual_attention(q, k, v):
+    """직접 짠 attention (4단계 조각 4 · 5). q · k · v: (B, n_head, T, head_dim) -> 섞은 결과 (B, n_head, T, head_dim).
+
+    10단계 조각 6 에서 forward 는 내장 SDPA 로 바꿨다. 이 함수는 SDPA 와 같은 값인지 · 얼마나 빠른지 비교하려고 남겨 둔다 (문서 6-1 · 6-5).
+    """
+    # 글자 수. 가리기 지도의 크기 (T, T) 에 쓴다
+    T = q.size(-2)
+
+    # ---- ① 점수: 모든 글자 쌍의 질문-명찰이 얼마나 맞는지 (문서 4-1) ----
+    # 질문 q 와 명찰 k 를 곱해서 더한다. @ 는 표 전체에 한 번에 해 주는 "곱해서 더하기".
+    # @ 는 앞 표의 가로줄과 뒤 표의 세로줄을 짝짓는데 k 는 글자 하나가 가로줄이라, 뒤에서 두 번째 · 맨 뒤 축을 맞바꿔 뒤집는다.
+    # 앞의 (B, n_head) 두 축은 묶음이라 문장마다 · 갈래마다 따로 계산된다 (문서 5-3 ②).
+    # shape: (B, n_head, T, head_dim) @ (B, n_head, head_dim, T) -> (B, n_head, T, T). 갈래마다 점수표 한 장
+    scores = q @ k.transpose(-2, -1)
+    # 결과: B=2, T=5, n_head=4 일 때 scores.shape = torch.Size([2, 4, 5, 5])
+
+    # ---- 크기 줄이기: 칸이 많으면 점수가 커져 softmax 가 한 글자에 100% 를 몰아 주므로 sqrt(칸 수)로 나눈다 (문서 4-2) ----
+    # 곱해서 더하는 줄이 이제 갈래 하나라서, 조각 4 의 sqrt(C) 대신 갈래 하나의 칸 수 sqrt(head_dim) 을 쓴다 (문서 5-3 ③).
+    scores = scores / math.sqrt(q.size(-1))
+
+    # ---- ② 마스킹: 뒤 글자를 못 보게 가린다 (문서 4-3) ----
+    # 볼 수 있는 칸 = 1 · 못 보는 칸 = 0 인 지도. tril 은 왼쪽 아래 삼각형만 남기고 나머지를 0 으로 만든다.
+    # device=q.device: 지도를 입력과 같은 장치(GPU/CPU)에 만든다. 다르면 점수표와 계산이 안 된다.
+    # 지도는 (T, T) 한 장이다. 점수표가 (B, n_head, T, T) 여도 앞 두 축으로 자동 복사되어 모든 갈래에 같은 지도가 적용된다.
+    mask = torch.tril(torch.ones(T, T, device=q.device))
+    # 지도가 0 인 칸을 마이너스 무한대로 덮는다. -inf 는 softmax 를 거치면 정확히 0% 가 된다 (문서 4-4 ③).
+    # 0 점으로 덮으면 "조금은 참고" 가 되어 0% 가 아니라서 -inf 를 쓴다.
+    scores = scores.masked_fill(mask == 0, float("-inf"))
+
+    # ---- ③ softmax: 줄마다 점수를 합 1 인 %로 (문서 4-4) ----
+    # dim=-1: 맨 뒤 축 방향 = 한 줄 안의 칸끼리 합을 1 로 맞춘다. 점수표의 한 줄이 한 글자의 참고 비율이라서다.
+    att = F.softmax(scores, dim=-1)
+    # att: (B, n_head, T, T) — 줄마다 합 1, 가려진 칸은 0
+    # 결과: att.shape = torch.Size([2, 4, 5, 5]) · 줄 합 1.0 (torch.manual_seed(0) · x = randn(2, 5, 128)) · 갈래마다 비율표가 다르다
+    #       첫 문장 갈래 0 마지막 줄 [0.11, 0.16, 0.23, 0.23, 0.28] · 갈래 1 마지막 줄 [0.27, 0.11, 0.19, 0.13, 0.30]
+
+    # ---- ④ 가져오기: % 대로 노트(v)를 섞어 새 줄을 만든다 (문서 4-5) ----
+    # 비율표와 노트를 곱해서 더한다. 앞에 비율표, 뒤에 노트.
+    # (B, n_head, T, T) @ (B, n_head, T, head_dim) -> (B, n_head, T, head_dim)
+    return att @ v
+    # 결과: 돌려주는 값 shape = torch.Size([2, 4, 5, 32]) — 아직 갈래가 나뉜 채
+
+
 # ---- 조각 3: Q / K / V (글자 하나에서 질문 · 열쇠 · 값 세 줄 만들기) ----
 
 class CausalSelfAttention(nn.Module):
@@ -252,39 +295,13 @@ class CausalSelfAttention(nn.Module):
         q = apply_rope(q, self.rope_cos, self.rope_sin)
         k = apply_rope(k, self.rope_cos, self.rope_sin)
 
-        # ---- ① 점수: 모든 글자 쌍의 질문-명찰이 얼마나 맞는지 (문서 4-1) ----
-        # 질문 q 와 명찰 k 를 곱해서 더한다. @ 는 표 전체에 한 번에 해 주는 "곱해서 더하기".
-        # @ 는 앞 표의 가로줄과 뒤 표의 세로줄을 짝짓는데 k 는 글자 하나가 가로줄이라, 뒤에서 두 번째 · 맨 뒤 축을 맞바꿔 뒤집는다.
-        # 앞의 (B, n_head) 두 축은 묶음이라 문장마다 · 갈래마다 따로 계산된다 (문서 5-3 ②).
-        # shape: (B, n_head, T, head_dim) @ (B, n_head, head_dim, T) -> (B, n_head, T, T). 갈래마다 점수표 한 장
-        scores = q @ k.transpose(-2, -1)
-        # 결과: B=2, T=5, n_head=4 일 때 scores.shape = torch.Size([2, 4, 5, 5])
-
-        # ---- 크기 줄이기: 칸이 많으면 점수가 커져 softmax 가 한 글자에 100% 를 몰아 주므로 sqrt(칸 수)로 나눈다 (문서 4-2) ----
-        # 곱해서 더하는 줄이 이제 갈래 하나라서, 조각 4 의 sqrt(C) 대신 갈래 하나의 칸 수 sqrt(head_dim) 을 쓴다 (문서 5-3 ③).
-        scores = scores / math.sqrt(self.head_dim)
-
-        # ---- ② 마스킹: 뒤 글자를 못 보게 가린다 (문서 4-3) ----
-        # 볼 수 있는 칸 = 1 · 못 보는 칸 = 0 인 지도. tril 은 왼쪽 아래 삼각형만 남기고 나머지를 0 으로 만든다.
-        # device=x.device: 지도를 입력과 같은 장치(GPU/CPU)에 만든다. 다르면 점수표와 계산이 안 된다.
-        # 지도는 (T, T) 한 장이다. 점수표가 (B, n_head, T, T) 여도 앞 두 축으로 자동 복사되어 모든 갈래에 같은 지도가 적용된다.
-        mask = torch.tril(torch.ones(T, T, device=x.device))
-        # 지도가 0 인 칸을 마이너스 무한대로 덮는다. -inf 는 softmax 를 거치면 정확히 0% 가 된다 (문서 4-4 ③).
-        # 0 점으로 덮으면 "조금은 참고" 가 되어 0% 가 아니라서 -inf 를 쓴다.
-        scores = scores.masked_fill(mask == 0, float("-inf"))
-
-        # ---- ③ softmax: 줄마다 점수를 합 1 인 %로 (문서 4-4) ----
-        # dim=-1: 맨 뒤 축 방향 = 한 줄 안의 칸끼리 합을 1 로 맞춘다. 점수표의 한 줄이 한 글자의 참고 비율이라서다.
-        att = F.softmax(scores, dim=-1)
-        # att: (B, n_head, T, T) — 줄마다 합 1, 가려진 칸은 0
-        # 결과: att.shape = torch.Size([2, 4, 5, 5]) · 줄 합 1.0 (torch.manual_seed(0) · x = randn(2, 5, 128)) · 갈래마다 비율표가 다르다
-        #       첫 문장 갈래 0 마지막 줄 [0.11, 0.16, 0.23, 0.23, 0.28] · 갈래 1 마지막 줄 [0.27, 0.11, 0.19, 0.13, 0.30]
-
-        # ---- ④ 가져오기: % 대로 노트(v)를 섞어 새 줄을 만든다 (문서 4-5) ----
-        # 비율표와 노트를 곱해서 더한다. 앞에 비율표, 뒤에 노트.
-        # (B, n_head, T, T) @ (B, n_head, T, head_dim) -> (B, n_head, T, head_dim)
-        y = att @ v
-        # 결과: y.shape = torch.Size([2, 4, 5, 32]) — 아직 갈래가 나뉜 채
+        # ---- 10단계 조각 6: ① 점수 ~ ④ 섞기를 내장 SDPA 한 번으로 (문서 6-1 · 6-2) ----
+        # 직접 짠 다섯 줄(점수 · 크기 줄이기 · 가리기 · softmax · v 섞기)은 위 manual_attention 으로 옮겨 비교용으로 남겼다.
+        # SDPA 는 크기 줄이기(sqrt(head_dim) 으로 나누기)를 기본으로 한다 — q 의 맨 뒤 칸 수(32)를 보고 알아서.
+        # 가리기 지도(tril · -inf)는 인자 하나로 대신한다. 글 쓰는 모델은 언제나 "자기와 앞 글자만" 이라 지도 모양이 늘 같아서.
+        # shape: q · k · v (B, n_head, T, head_dim) -> y (B, n_head, T, head_dim) — manual_attention 과 같은 모양
+        # is_causal=True: 뒤 글자를 가리라는 인자 — 자기와 앞 글자만 본다 (문서 6-2 ③). 빼면 뒤 글자까지 보여 마스킹 확인이 False 가 된다
+        y =  F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
         # ---- ⑤ 합치기: 갈래들을 한 줄로 이어 붙이고 한 번 더 섞는다 (문서 5-4) ----
         # 갈래 축을 글자 축 뒤로 되돌린 (B, T, n_head, head_dim) 을 한 줄 C 칸으로 이어 읽는다.
@@ -514,6 +531,40 @@ if __name__ == "__main__":
     print(torch.allclose(qr[3] @ kr[1], qr[7] @ kr[5], atol=1e-5))  # 기대: True
     # 거리가 다르면 점수도 다르다: (3, 1) 거리 2 vs (3, 2) 거리 1
     print(torch.allclose(qr[3] @ kr[1], qr[3] @ kr[2], atol=1e-5))  # 기대: False
+
+    # 10단계 조각 6 확인: SDPA (문서 6-3 ~ 6-5)
+    # 학습 때와 같은 크기의 q · k · v — 문장 32 · 갈래 8 · 글자 128 · 갈래 하나 32칸. requires_grad: 뒤로 계산(학습)까지 재려고
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    q, k, v = [torch.randn(32, 8, 128, 32, device=dev, requires_grad=True) for _ in range(3)]
+    mine_y = manual_attention(q, k, v)
+    sdpa_y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    # 끝자리 반올림 차이만 있어야 한다 (문서 6-3) — == 대신 allclose · 차이가 1e-6 근처라 atol 을 1e-5 로
+    print(torch.allclose(mine_y, sdpa_y, atol=1e-5))  # 기대: True
+    print((mine_y - sdpa_y).abs().max().item())  # 기대: 0.000001 ~ 0.00001 근처 — 0 은 아니다 (실행마다 q · k · v 가 달라 조금씩 다름)
+
+    if dev == "cuda":
+        import time
+
+        def time_ms(fn, n=200):
+            """fn 을 n 번 돌린 평균 시간(밀리초)과 그동안 가장 많이 쓴 GPU 메모리(MB)."""
+            for _ in range(10):  # 데우기 — 처음 몇 번은 준비 작업이 섞여 느리다 (문서 6-4 ③)
+                fn()
+            # 시계를 보기 전에 GPU 가 받은 일을 다 끝낼 때까지 기다린다 (문서 6-4) — 재기 시작 전 · 재기 끝 두 곳
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()  # 메모리 최고 기록을 0 부터 다시
+            start = time.perf_counter()
+            for _ in range(n):
+                fn()
+            torch.cuda.synchronize()
+            return (time.perf_counter() - start) / n * 1000, torch.cuda.max_memory_allocated() / 2**20
+
+        # 앞으로 + 뒤로(학습 한 번 분) 계산. .sum() 으로 숫자 하나를 만들어야 backward 를 부를 수 있다
+        # 같은 실행 안에서 둘을 번갈아 두 번씩 잰다 — 조건이 같아 흔들림이 서로 상쇄된다 (문서 6-5 ③)
+        for name, fn in [("직접", lambda: manual_attention(q, k, v).sum().backward()),
+                         ("SDPA", lambda: F.scaled_dot_product_attention(q, k, v, is_causal=True).sum().backward())] * 2:
+            print(name, "%.2f ms · %.1f MB" % time_ms(fn))
+        # 결과 (RTX 3060 · fp32): 직접 2.21 · 2.23 ms · 128.4 MB / SDPA 1.18 · 1.19 ms · 92.7 MB — 시간 -47% · 메모리 -28%
+        #   이 PC 의 SDPA 는 메모리 효율 attention 을 쓴다 (Windows 판 torch 에 flash attention 없음 · flash 는 fp16 · bf16 전용이기도 함)
 
 # ---- 직접 실행 결과 (uv run python -m llm.model) ----
 # torch.Size([2, 5])
