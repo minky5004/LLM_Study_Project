@@ -76,6 +76,19 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size)
         # 결과: lm_head.weight.shape = torch.Size([69, 128]) · 파라미터 8901 = 128 x 69 + 69
 
+        # ---- 10단계 조각 7: weight tying — 글자 표와 출력층이 같은 숫자 표 하나를 쓴다 (10단계 문서 7-1 ~ 7-4) ----
+        # 글자 표 wte.weight 는 (vocab_size, n_embd) · 출력층 lm_head.weight 도 (나가는 칸, 들어오는 칸) = (vocab_size, n_embd) 로 모양이 같다.
+        # 글자 표: 번호 -> 그 번호의 줄 · 출력층: 줄 -> 글자마다 "그 글자의 줄과 얼마나 닮았나" 점수. 같은 표의 앞뒤라 하나로 묶는다 (문서 7-1).
+        # 복사가 아니라 같은 표를 가리키게 한다 — 한쪽이 학습으로 고쳐지면 다른 쪽도 같이 고쳐진다. 출력층의 bias(글자마다 더하는 숫자)는 그대로 따로.
+        self.lm_head.weight = self.wte.weight
+        # 결과: 학습 크기 파라미터 5,260,024 -> 4,997,880 (-262,144 = 1024 x 256) · lm_head.weight is wte.weight True
+        #       state_dict 에는 wte.weight · lm_head.weight 이름이 둘 다 남지만 같은 표 하나라 불러올 때도 묶인 채로 채워진다
+
+        # 처음 크기를 작게 (문서 7-3). nn.Embedding 은 처음에 표준편차 1 로 채우는데, 출력층에선 이 크기가 점수를 16배쯤 키워
+        # 학습 전 손실이 242.7 이 된다 (아무것도 모를 때의 손실 ln(1024) = 6.93 이어야 정상). GPT-2 처럼 0.02 로 채우면 6.99 (실행 확인 · 학습 크기).
+        # 표가 하나라 wte 쪽에만 해도 lm_head 도 같이 바뀐다.
+        nn.init.normal_(self.wte.weight, mean=0.0, std=0.02)
+
     def forward(self, idx):
         """forward = 데이터가 실제로 흘러가는 곳. 모델을 부를 때마다 실행된다.
 
@@ -462,8 +475,15 @@ if __name__ == "__main__":
     # 조각 7 확인: 모델 전체. 번호 (B, T) 가 들어가 글자 종류마다 점수 한 칸씩 (B, T, vocab_size) 이 나온다
     logits = model(idx)
     print(logits.shape)  # 기대: torch.Size([2, 5, 69])
-    # 기대: 810093 = 글자 표 8832 + 블록 198058 x 4 + ln_f 128 + 출력층 8901 (128 x 69 + 69) · ReLU FFN 때 809925 (+168 = 42 x 4) · 자리표 있을 때 826309 · LayerNorm 때 827461
+    # 기대: 801261 = 글자 표 8832 (출력층과 같이 씀) + 블록 198058 x 4 + ln_f 128 + 출력층 bias 69 · 묶기 전 810093 (-8832 = 69 x 128) · ReLU FFN 때 809925 · LayerNorm 때 827461
+    # model.parameters() 는 같은 표를 한 번만 센다 — 그래서 묶은 만큼 줄어든다
     print(sum(p.numel() for p in model.parameters()))
+
+    # 10단계 조각 7 확인: weight tying (문서 7-3 · 7-4)
+    # 두 표가 "값이 같은" 게 아니라 "같은 표 하나" 인지 묻는다 — == 는 칸마다 비교한 표가 나와서 is (문서 7-4)
+    print(model.lm_head.weight is model.wte.weight)  # 기대: True
+    # 학습 전 손실이 "아무것도 모를 때" 의 ln(69) = 4.23 근처인가. 무작위 정답으로 재 본다 (처음 크기 0.02 덕 · 문서 7-3)
+    print(F.cross_entropy(logits.view(-1, config.vocab_size), torch.randint(0, config.vocab_size, (B * T,))).item())  # 기대: 4.2 근처 (실행마다 4.18 · 4.29 처럼 조금씩 다름 — 처음 크기 1 이면 학습 크기에서 242.7)
 
     # 조각 3 확인: 위치까지 섞은 out 을 attention 부품에 넣어 Q / K / V 를 만든다
     attn = CausalSelfAttention(config)
