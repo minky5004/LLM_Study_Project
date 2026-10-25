@@ -4,6 +4,7 @@ GPT-2식으로 먼저 완성하고, 돌아가면 부품을 하나씩 현대식�
 지금은 조각 7까지: 토큰 임베딩 + 위치 임베딩 (몇 번째 글자인지 알려 주기) + multi-head attention + 블록 (FFN · 잔차 · LayerNorm) + 블록 쌓기 · 출력층.
 8단계 조각 3: dropout 을 실제로 켠다 — 임베딩 합 뒤 · 블록 안 attention · FFN 출력 뒤 (8단계 문서 3-3).
 10단계 조각 3: LayerNorm 13곳을 직접 짠 RMSNorm 으로 교체 (10단계 문서 3-1 ~ 3-4).
+10단계 조각 4: 위치 임베딩 표(wpe) 삭제 · 위치는 attention 안에서 q · k 를 돌려 알려 준다 — RoPE (10단계 문서 4-1 ~ 4-5).
 """
 
 import math
@@ -47,8 +48,8 @@ class GPT(nn.Module):
         # 같은 글자는 어느 자리에 있든 글자 표에서 같은 줄을 받는다. 글은 순서가 뜻이라 자리 정보를 따로 넣어 줘야 한다.
         #   - 줄 수: 자리가 몇 종류냐 = 모델이 한 번에 볼 수 있는 글자 수의 최댓값 = block_size (T 가 아니다 — T 는 입력마다 달라서 __init__ 시점엔 모른다)
         #   - 칸 수: 글자 줄에 "더할" 거라 글자 표와 칸 수가 같아야 한다 (이어 붙이면 줄이 길어져 뒤 부품이 전부 바뀐다)
-        self.wpe = nn.Embedding(config.block_size, config.n_embd)
-        # 결과: self.wpe.weight.shape = torch.Size([128, 128]) — 줄 128개(자리) × 칸 128개
+        # 10단계 조각 4: 이 표를 지웠다 — 위치는 attention 안에서 q · k 를 돌려 알려 준다 (RoPE · 10단계 문서 4-1).
+        # 결과 (지우기 전): self.wpe.weight.shape = torch.Size([128, 128]) — 줄 128개(자리) × 칸 128개 · 학습 크기(256칸)에선 32,768개
 
         # 8단계 조각 3: 글자 줄 + 자리 줄을 합친 직후에 쓸 dropout (8단계 문서 3-3).
         # 학습 모드일 때만 config.dropout 비율만큼 숫자를 무작위로 0 으로 지운다. 학습할 숫자가 없어 파라미터 수는 그대로다.
@@ -85,26 +86,11 @@ class GPT(nn.Module):
         tok_emb = self.wte(idx)
         # 결과: idx (2, 5) -> tok_emb (2, 5, 128). 같은 번호는 같은 줄을 받는다 (번호 [0, 1, 0] 의 첫째 · 셋째 줄이 똑같음 — 실행 확인)
 
-        # 이번 입력의 글자 수 T 를 shape 에서 꺼낸다. (B, T) 의 뒤쪽 값. shape 는 값 둘짜리 묶음이라 B, T = ... 로 풀어 받을 수 있다.
-        B, T = idx.shape
+        # 10단계 조각 4: 자리 줄을 더하던 단계(자리 번호 만들기 · wpe 에서 꺼내기 · tok_emb + pos_emb)를 지웠다.
+        # 이제 글자 줄에는 위치가 없다 — 번호 [0, 1, 0] 의 첫째 · 셋째 줄이 다시 같다. 위치는 attention 이 q · k 를 돌려서 알려 준다.
+        x = tok_emb
 
-        # 자리 번호 [0, 1, ..., T-1] 을 직접 만든다. 자리는 입력 값이 아니라 "몇 번째 칸이냐" 일 뿐이라 문장이 몇 개든 같다.
-        # device=idx.device: 입력이 GPU 에 있으면 자리 번호도 같은 곳에 만든다 (CPU/GPU 가 섞이면 에러)
-        # 자리 번호는 글자 개수 T 만큼 필요하다 (문장 개수 B 와는 무관).
-        pos = torch.arange(T, device=idx.device)
-        # 결과: T = 5 일 때 pos = tensor([0, 1, 2, 3, 4]) — shape (5,)
-
-        # 자리 번호로 자리 줄을 꺼낸다. shape: (T,) -> (T, n_embd)  (문장 개수 B 가 없다 — 자리 줄은 어느 문장이든 같아서 한 벌이면 된다)
-        pos_emb = self.wpe(pos)
-        # 결과: pos (5,) -> pos_emb (5, 128)
-
-        # 글자 줄과 자리 줄을 합친다. (B, T, n_embd) 와 (T, n_embd) 는 모양이 다르지만
-        # broadcasting 이 pos_emb 를 B 개 문장에 똑같이 복사해 맞춰 준다. 결과 shape: (B, T, n_embd)
-        # 이어 붙이는 게 아니라 칸마다 더한다 (그래서 shape 가 그대로).
-        x = tok_emb + pos_emb
-        # 결과: (2, 5, 128) + (5, 128) -> (2, 5, 128). 번호 [0, 1, 0] 의 첫째 · 셋째 줄이 이제 서로 다름 (조각 1 에서는 같았다 — 실행 확인)
-
-        # 합친 줄에 dropout. 모양은 그대로 (B, T, n_embd) — 숫자 일부가 0 이 될 뿐이다. 점검 모드(eval)면 아무것도 안 한다.
+        # 글자 줄에 dropout. 모양은 그대로 (B, T, n_embd) — 숫자 일부가 0 이 될 뿐이다. 점검 모드(eval)면 아무것도 안 한다.
         x = self.drop(x)
 
         # 블록을 순서대로 통과시킨다. 앞 블록의 출력이 다음 블록의 입력이다. 블록은 모양을 안 바꾸므로 x 는 계속 (B, T, n_embd).
@@ -120,6 +106,64 @@ class GPT(nn.Module):
         #       한 줄의 합이 1 이 아니다 (-1.349 — 날점수의 증거) · 전체 파라미터 827461
         #       마지막 글자만 바꿔도 앞 4글자의 logits 는 그대로 True (모델 전체에서도 마스킹이 지켜진다)
         return logits
+
+
+# ---- 10단계 조각 4: RoPE — q · k 를 자리만큼 돌려 위치 알려 주기 (10단계 문서 4-1 ~ 4-5) ----
+
+def rope_tables(head_dim, block_size, base=10000.0):
+    """자리마다 · 짝마다 돌릴 각도의 cos 표 · sin 표를 만든다. 둘 다 shape (block_size, head_dim // 2).
+
+    학습하는 숫자가 아니라 자리와 속도로 정해지는 고정값이라, 모델을 만들 때 한 번만 부른다 (문서 4-5 ②).
+    """
+    # 짝마다 도는 속도 (문서 4-4 ③). 짝 i 의 속도 = 1 / base^(2i / head_dim).
+    # torch.arange(0, head_dim, 2) = [0, 2, 4, ..., head_dim-2] 가 곧 2i 다. 짝 수만큼 head_dim // 2 개.
+    # 첫 짝은 1 (한 칸에 1 라디안 — 빠른 초침) · 뒤로 갈수록 느려져 마지막 짝은 거의 안 돈다 (시침).
+    speed = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+    # 결과: head_dim = 32 일 때 speed.shape = (16,) · speed[0] = 1.0 · speed[1] = 0.5623 · speed[-1] = 0.000178
+
+    # 자리 번호 [0, 1, ..., block_size-1]. 모델이 볼 수 있는 최대 길이만큼 미리 만든다 (입력 길이 T 는 forward 에서 잘라 쓴다).
+    pos = torch.arange(block_size).float()
+
+    # 각도 = 자리 × 속도 (문서 4-4 ④). 모든 (자리, 짝) 쌍마다 하나씩 → shape (block_size, head_dim // 2).
+    # 그냥 pos * speed 는 길이가 달라 에러. pos 에 [:, None] 을 붙여 세로 막대 (block_size, 1) 로 세우면
+    # broadcasting(모양 자동 맞추기)이 가로 막대 speed (head_dim // 2,) 와 곱해 표로 펼쳐 준다 — 줄 = 자리 · 칸 = 짝.
+    # speed 쪽을 세우면 (head_dim // 2, block_size) 로 뒤집혀 apply_rope 의 cos[:T] 가 자리 대신 짝을 잘라 에러가 난다.
+    angles = pos[:,None] * speed
+    # 결과: head_dim = 32 · block_size = 128 일 때 angles.shape = (128, 16) · 자리 1 줄 = speed 그대로 · 자리 0 줄은 전부 0
+    #       speed[:, None] 으로 세우면 (16, 128) → RuntimeError (size of tensor a (16) must match the size of tensor b (128))
+
+    return angles.cos(), angles.sin()
+
+
+def apply_rope(t, cos, sin):
+    """q 나 k 를 자리만큼 돌린다. t: (B, n_head, T, head_dim) -> 같은 모양.
+
+    칸을 두 개씩 짝지어 (앞 칸 a, 뒤 칸 b) 를 평면 화살표로 보고, 짝마다 각도만큼 돌린다 (문서 4-3).
+    """
+    T = t.shape[-2]  # 이번 입력의 글자 수
+
+    # 각도표는 block_size 자리만큼 만들어 두었으니 앞 T 자리만 쓴다. (block_size, head_dim // 2) -> (T, head_dim // 2)
+    # (T, head_dim // 2) 는 맨 뒤 두 축이 t 의 (T, head_dim // 2) 와 같아서, 앞의 (B, n_head) 로 자동 복사되어 곱해진다.
+    cos, sin = cos[:T], sin[:T]
+
+    # 짝의 앞 칸 묶음 a · 뒤 칸 묶음 b 로 떼어 낸다 (문서 4-3 ④). 둘 다 (B, n_head, T, head_dim // 2).
+    # `...` 은 "앞 축은 전부 그대로" · 맨 뒤 축만 고른다. 고르는 문법은 "시작:끝:간격" (끝을 비우면 끝까지).
+    # 짝의 앞 칸 = 0, 2, 4, ... 번 칸 (0::2) · 뒤 칸 = 1, 3, 5, ... 번 칸 (1::2)
+    a = t[..., 0::2]
+    b = t[..., 1::2]
+
+    # 짝마다 각도만큼 돌리는 공식 (문서 4-3 ②). 칸마다 따로 계산되어 모양은 그대로 (B, n_head, T, head_dim // 2).
+    # 새 가로(앞 칸) = a cos − b sin · 새 세로(뒤 칸) = a sin + b cos.
+    # 가운데 부호가 빼기여야 돌리기다 — 더하기면 화살표 길이가 바뀌고 "거리만 남는다" 가 깨진다.
+    # (1, 0) 을 90도 돌리는 예로는 b = 0 이라 부호 실수가 안 보인다. (0, 1) → (-1, 0) 으로 확인한다.
+    new_a = a * cos - b * sin
+    new_b = a * sin + b * cos
+    # 결과: 돌린 뒤 줄 길이가 돌리기 전과 allclose True · (자리 3, 자리 1) 과 (자리 7, 자리 5) 의 q·k 점수가 같다 (아래 확인 출력)
+
+    # 돌린 두 묶음을 원래 칸 자리로 되돌린다 — 짝수 번 칸에 new_a · 홀수 번 칸에 new_b.
+    # stack(dim=-1) 로 짝을 맨 뒤 축에 나란히 세우고 (…, head_dim // 2, 2) · flatten(-2) 로 두 축을 한 줄로 이어 읽는다 (…, head_dim).
+    # 결과 순서: [new_a[0], new_b[0], new_a[1], new_b[1], ...] = 원래의 [0번, 1번, 2번, 3번, ...] 칸 자리
+    return torch.stack([new_a, new_b], dim=-1).flatten(-2)
 
 
 # ---- 조각 3: Q / K / V (글자 하나에서 질문 · 열쇠 · 값 세 줄 만들기) ----
@@ -162,6 +206,13 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.head_dim = config.n_embd // config.n_head
 
+        # 10단계 조각 4: RoPE 각도표 (문서 4-5). 갈래 하나의 칸 수(head_dim)를 짝지어 돌리므로 head_dim 으로 만든다.
+        # register_buffer: 학습은 안 하지만 model.to("cuda") 때 같이 GPU 로 옮겨지는 칸. 그냥 self.rope_cos = ... 면 CPU 에 남아 에러.
+        # persistent=False: 모델 파일(state_dict)에는 저장하지 않는다 — 언제든 같은 값으로 다시 계산되니까.
+        cos, sin = rope_tables(self.head_dim, config.block_size)
+        self.register_buffer("rope_cos", cos, persistent=False)
+        self.register_buffer("rope_sin", sin, persistent=False)
+
         # 갈래마다 따로 attention 한 결과를 이어 붙이면 갈래끼리는 아직 안 섞이고 나란히 놓여 있을 뿐이다.
         # nn.Linear 한 번을 더 통과시켜 갈래들의 결과를 서로 섞는다 (output projection, 문서 5-4 ④).
         # 파라미터가 128 x 128 + 128 = 16512 늘어난다.
@@ -194,6 +245,11 @@ class CausalSelfAttention(nn.Module):
         q = self._split_heads(self.q_proj(x))
         k = self._split_heads(self.k_proj(x))
         v = self._split_heads(self.v_proj(x))
+
+        # 10단계 조각 4: 점수를 만드는 q · k 만 자리만큼 돌린다 (문서 4-5 ①). v 는 점수가 정해진 뒤 섞일 내용이라 그대로.
+        # 모양은 그대로 (B, n_head, T, head_dim) — 돌리기는 길이를 안 바꾸고 각도만 바꾼다 (문서 4-2 ④).
+        q = apply_rope(q, self.rope_cos, self.rope_sin)
+        k = apply_rope(k, self.rope_cos, self.rope_sin)
 
         # ---- ① 점수: 모든 글자 쌍의 질문-명찰이 얼마나 맞는지 (문서 4-1) ----
         # 질문 q 와 명찰 k 를 곱해서 더한다. @ 는 표 전체에 한 번에 해 주는 "곱해서 더하기".
@@ -368,16 +424,17 @@ if __name__ == "__main__":
     idx = torch.randint(0, config.vocab_size, (B, T))
 
     # 조각 7 부터 model(idx) 는 글자별 점수(logits)를 낸다. 조각 1~6 확인은 "임베딩만 거친 줄" 이 필요해서 표를 직접 불러 만든다.
-    out = model.wte(idx) + model.wpe(torch.arange(T))
+    # 10단계 조각 4: 자리표 wpe 를 지워 글자 표만 거친다
+    out = model.wte(idx)
     print(idx.shape)   # 기대: torch.Size([2, 5])
-    print(out.shape)   # 기대: torch.Size([2, 5, 128]) (자리를 더해도 모양은 그대로)
-    # 기대: 25216 = 글자 표 8832 (69 x 128) + 자리표 16384 (128 x 128)
-    print(model.wte.weight.numel() + model.wpe.weight.numel())
+    print(out.shape)   # 기대: torch.Size([2, 5, 128])
+    # 기대: 8832 = 글자 표 (69 x 128) · 자리표가 있을 때 25216 (+ 128 x 128)
+    print(model.wte.weight.numel())
 
     # 조각 7 확인: 모델 전체. 번호 (B, T) 가 들어가 글자 종류마다 점수 한 칸씩 (B, T, vocab_size) 이 나온다
     logits = model(idx)
     print(logits.shape)  # 기대: torch.Size([2, 5, 69])
-    # 기대: 826309 = 임베딩 25216 + 블록 198016 x 4 + ln_f 128 + 출력층 8901 (128 x 69 + 69) · LayerNorm 때 827461 (-1152 = 128 x 9곳)
+    # 기대: 809925 = 글자 표 8832 + 블록 198016 x 4 + ln_f 128 + 출력층 8901 (128 x 69 + 69) · 자리표 있을 때 826309 (-16384 = 128 x 128) · LayerNorm 때 827461
     print(sum(p.numel() for p in model.parameters()))
 
     # 조각 3 확인: 위치까지 섞은 out 을 attention 부품에 넣어 Q / K / V 를 만든다
@@ -424,12 +481,27 @@ if __name__ == "__main__":
     # 크기 맞추기 확인: gamma 가 1 이면 글자마다 줄의 제곱 평균이 1 근처
     print(RMSNorm(config.n_embd)(out).pow(2).mean(dim=-1)[0])  # 기대: 1 근처 5개
 
+    # 10단계 조각 4 확인: RoPE (문서 4-2)
+    head_dim = config.n_embd // config.n_head
+    cos, sin = rope_tables(head_dim, config.block_size)
+    print(cos.shape)  # 기대: torch.Size([128, 16]) — 자리 128 × 짝 16
+    # 같은 q 줄 · 같은 k 줄을 10 자리 모두에 놓고 돌린다. (1, 1, 10, head_dim) = 문장 1 · 갈래 1 · 글자 10
+    q_line, k_line = torch.randn(head_dim), torch.randn(head_dim)
+    qr = apply_rope(q_line.expand(1, 1, 10, head_dim), cos, sin)[0, 0]  # (10, head_dim) — 자리마다 돌린 q
+    kr = apply_rope(k_line.expand(1, 1, 10, head_dim), cos, sin)[0, 0]
+    # 돌려도 길이는 그대로 (문서 4-2 ④)
+    print(torch.allclose(qr.norm(dim=-1), q_line.norm().expand(10)))  # 기대: True
+    # 거리만 남는다: (자리 3, 자리 1) 과 (자리 7, 자리 5) 는 둘 다 거리 2 → 점수가 같다
+    print(torch.allclose(qr[3] @ kr[1], qr[7] @ kr[5], atol=1e-5))  # 기대: True
+    # 거리가 다르면 점수도 다르다: (3, 1) 거리 2 vs (3, 2) 거리 1
+    print(torch.allclose(qr[3] @ kr[1], qr[3] @ kr[2], atol=1e-5))  # 기대: False
+
 # ---- 직접 실행 결과 (uv run python -m llm.model) ----
 # torch.Size([2, 5])
 # torch.Size([2, 5, 128])
-# 25216
+# 8832                       <- 10단계 조각 4 (RoPE) · 자리표 있을 때 25216
 # torch.Size([2, 5, 69])
-# 826309                     <- 10단계 조각 3 (RMSNorm) · LayerNorm 때 827461
+# 809925                     <- 10단계 조각 4 (RoPE · 자리표 -16384) · RMSNorm 만 826309 · LayerNorm 때 827461
 # torch.Size([2, 5, 128])
 # 66048
 # True
@@ -441,4 +513,8 @@ if __name__ == "__main__":
 # True                       <- 직접 짠 RMSNorm == nn.RMSNorm (allclose · 무작위 gamma)
 # 128
 # tensor([1.0000, 1.0000, 1.0000, 1.0000, 1.0000], grad_fn=<SelectBackward0>)  <- 글자 5개 모두 제곱 평균 1
+# torch.Size([128, 16])      <- RoPE 각도표: 자리 128 × 짝 16
+# True                       <- 돌려도 줄 길이 그대로
+# True                       <- (3, 1) 과 (7, 5) — 거리 2 끼리 점수 같음
+# False                      <- (3, 1) 과 (3, 2) — 거리 2 와 1 은 점수 다름
 # 학습 크기(6층 · 256칸 · BPE 1024) 파라미터 5,293,824 — LayerNorm 때 5,297,152 (-3,328 = 256 x 13곳 · -0.06%)
