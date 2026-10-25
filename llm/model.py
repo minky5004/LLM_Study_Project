@@ -5,6 +5,7 @@ GPT-2식으로 먼저 완성하고, 돌아가면 부품을 하나씩 현대식�
 8단계 조각 3: dropout 을 실제로 켠다 — 임베딩 합 뒤 · 블록 안 attention · FFN 출력 뒤 (8단계 문서 3-3).
 10단계 조각 3: LayerNorm 13곳을 직접 짠 RMSNorm 으로 교체 (10단계 문서 3-1 ~ 3-4).
 10단계 조각 4: 위치 임베딩 표(wpe) 삭제 · 위치는 attention 안에서 q · k 를 돌려 알려 준다 — RoPE (10단계 문서 4-1 ~ 4-5).
+10단계 조각 5: FFN 의 ReLU 를 SwiGLU 로 — 문 줄(SiLU) × 내용 줄 · 펼치는 칸 4배 → 8/3배로 숫자 수 맞춤 (10단계 문서 5-1 ~ 5-4).
 """
 
 import math
@@ -301,39 +302,49 @@ class CausalSelfAttention(nn.Module):
 
 # ---- 조각 6: FFN · 잔차 · LayerNorm 으로 블록 하나 완성 (문서 6-1 ~ 6-5) ----
 
+def silu(x):
+    """SiLU (Swish): x × sigmoid(x). 큰 양수는 거의 그대로 · 큰 음수는 거의 0 · 0 근처는 부드럽게 (10단계 문서 5-2).
+
+    sigmoid 는 숫자를 0 ~ 1 사이 비율로 바꾸는 함수 — torch.sigmoid 로 부른다. 칸마다 따로 계산되어 모양은 그대로.
+    """
+    # x 에 "x 의 sigmoid" 를 칸마다 곱한다
+    return x * torch.sigmoid(x)
+    # 결과: silu([2, -2, 0, -1.28, 5, -5]) = [1.7616, -0.2384, 0.0000, -0.2785, 4.9665, -0.0335] — -1.28 근처가 가장 낮은 값 -0.28
+
+
 class FeedForward(nn.Module):
     """FFN: 글자마다 따로 줄을 가공하는 작은 신경망. shape (B, T, n_embd) -> (B, T, n_embd).
 
     attention 이 글자끼리 섞어 내용을 모아 온 뒤, 그 내용을 글자 하나 안에서 가공한다 (문서 6-1).
     글자끼리는 섞지 않는다 — 첫 글자만 바꿔도 다른 글자의 결과는 그대로다.
-    모양은 Linear(펼치기) -> 활성화 함수 -> Linear(접기).
+    10단계 조각 5: GPT-2 의 Linear(펼치기) -> ReLU -> Linear(접기) 를 SwiGLU 로 바꿨다 (10단계 문서 5-1 ~ 5-4).
+    같은 입력에서 문 줄(gate)과 내용 줄(up)을 펼쳐 만들고, 문에 SiLU 를 씌워 칸마다 곱한 뒤 접는다(down).
     """
 
     def __init__(self, config: ModelConfig):
         super().__init__()
 
-        # 가운데에서 줄을 넓게 펼쳤다가 원래 칸 수로 접는다. GPT-2 관례로 입력 칸 수(n_embd)의 몇 배를 쓴다 (문서 6-1 ④).
-        # 4 배로 펼친다 (128 -> 512). 4 배는 GPT-2 가 쓴 관례다. 512 를 직접 적지 않고 n_embd 에 곱해서 n_embd 를 바꿔도 같이 따라가게 한다.
-        hidden = 4 * config.n_embd
-        # 결과: n_embd=128 이면 hidden = 512 (n_embd=64 이면 256 · 256 이면 1024)
+        # 펼치는 칸 수. GPT-2 는 4배(Linear 2개)였다. SwiGLU 는 Linear 가 3개라 4배 그대로면 숫자가 1.5배가 된다.
+        # 숫자 수를 맞춰야 "구조 덕인지 숫자가 늘어난 덕인지" 가릴 수 있어서 4배의 2/3 = 8/3배로 줄인다 (문서 5-3).
+        # 4 * n_embd 의 2/3 — 칸 수는 정수여야 해서 int(...) 로 감싼다 (소수점 아래는 버림)
+        hidden = int(4 * config.n_embd * 2 / 3)
+        # 결과: n_embd=128 이면 hidden = 341 (341.33 버림) · 256 이면 682 · GPT-2 때는 512 · 1024
 
-        # 펼치는 기계: 들어오는 칸 n_embd -> 나가는 칸 hidden.  shape (B, T, n_embd) -> (B, T, hidden)
-        self.fc1 = nn.Linear(config.n_embd, hidden)
-        # 접는 기계: hidden -> n_embd. 입력과 같은 칸 수로 돌아와야 잔차에서 더할 수 있다 (문서 6-3 ④).
-        self.fc2 = nn.Linear(hidden, config.n_embd)
-        # 결과: FFN 파라미터 131712 = fc1 (128 x 512 + 512) + fc2 (512 x 128 + 128)
+        # 문 줄을 만드는 기계와 내용 줄을 만드는 기계. 둘 다 n_embd -> hidden 으로 같은 모양이지만 숫자가 따로라 다른 줄이 나온다
+        # (조각 3 에서 q_proj · k_proj 를 따로 만든 것과 같은 이유).  shape (B, T, n_embd) -> (B, T, hidden)
+        self.gate = nn.Linear(config.n_embd, hidden)
+        self.up = nn.Linear(config.n_embd, hidden)
+        # 접는 기계: hidden -> n_embd. 입력과 같은 칸 수로 돌아와야 잔차에서 더할 수 있다 (문서 6-3 ④). (GPT-2 때 이름 fc2)
+        self.down = nn.Linear(hidden, config.n_embd)
+        # 결과 (GPT-2 때): FFN 파라미터 131712 = fc1 (128 x 512 + 512) + fc2 (512 x 128 + 128)
 
     def forward(self, x):
-        # 펼친다. shape (B, T, n_embd) -> (B, T, hidden)
-        x = self.fc1(x)
-
-        # Linear 둘을 바로 이으면 Linear 하나와 같아진다. 사이에 음수는 0 으로 · 양수는 그대로 두는 함수를 끼워 합쳐지지 않게 한다 (문서 6-2).
-        # F.relu: 학습할 숫자가 없는 함수다. 칸마다 따로 적용된다.
-        x = F.relu(x)
-        # 결과: F.relu([-1.0, 2.0, -0.5, 3.0]) = [0.0, 2.0, 0.0, 3.0] (음수만 0 으로 · shape 는 그대로)
+        # 문 줄에 SiLU 를 씌워 "칸마다 통과량" 으로 만들고, 내용 줄과 칸마다 곱한다 (문서 5-1 ③ · 5-2).
+        # 둘 다 (B, T, hidden) 이라 * 는 같은 자리 칸끼리 곱한다. shape (B, T, n_embd) -> (B, T, hidden)
+        x = silu(self.gate(x)) * self.up(x)
 
         # 접는다. shape (B, T, hidden) -> (B, T, n_embd)
-        x = self.fc2(x)
+        x = self.down(x)
         return x
 
 
@@ -406,7 +417,7 @@ class Block(nn.Module):
         x = x + self.drop(self.ffn(self.ln2(x)))
         # 결과 (8단계 조각 3): 6층 · 256칸 · dropout 0.2 로 5000번 학습 → 검증 손실 최저 1.6435 (dropout 0 이면 같은 크기에서 1.72 뒤 외우기)
         # 결과: 블록 출력 shape = torch.Size([2, 5, 128]) — 입력과 같은 모양
-        #       attention 의 o_proj · FFN 의 fc2 를 0 으로 만들면 블록이 입력을 그대로 돌려준다 (allclose True — 잔차의 증거)
+        #       attention 의 o_proj · FFN 의 접기(GPT-2 때 fc2 · 지금 down)를 0 으로 만들면 블록이 입력을 그대로 돌려준다 (allclose True — 잔차의 증거)
         #       마지막 글자만 바꿔도 앞 4글자의 출력은 그대로 True (블록 전체에서도 마스킹이 지켜진다)
         #       ModelConfig(n_embd=64, n_head=2) · (n_embd=256, n_head=8) 도 같은 코드로 모양이 맞게 돈다
         return x
@@ -434,7 +445,7 @@ if __name__ == "__main__":
     # 조각 7 확인: 모델 전체. 번호 (B, T) 가 들어가 글자 종류마다 점수 한 칸씩 (B, T, vocab_size) 이 나온다
     logits = model(idx)
     print(logits.shape)  # 기대: torch.Size([2, 5, 69])
-    # 기대: 809925 = 글자 표 8832 + 블록 198016 x 4 + ln_f 128 + 출력층 8901 (128 x 69 + 69) · 자리표 있을 때 826309 (-16384 = 128 x 128) · LayerNorm 때 827461
+    # 기대: 810093 = 글자 표 8832 + 블록 198058 x 4 + ln_f 128 + 출력층 8901 (128 x 69 + 69) · ReLU FFN 때 809925 (+168 = 42 x 4) · 자리표 있을 때 826309 · LayerNorm 때 827461
     print(sum(p.numel() for p in model.parameters()))
 
     # 조각 3 확인: 위치까지 섞은 out 을 attention 부품에 넣어 Q / K / V 를 만든다
@@ -455,13 +466,13 @@ if __name__ == "__main__":
     block = Block(config)
     z = block(out)
     print(z.shape)  # 기대: torch.Size([2, 5, 128])
-    # 기대: 198016 = attention 66048 + RMSNorm 128 x 2 + FFN 131712 (128 x 512 + 512 + 512 x 128 + 128) · LayerNorm 때 198272
+    # 기대: 198058 = attention 66048 + RMSNorm 128 x 2 + SwiGLU FFN 131754 · ReLU FFN 때 198016 (FFN 131712) · LayerNorm 때 198272
     print(sum(p.numel() for p in block.parameters()))
 
-    # 잔차 확인: 부품의 마지막 Linear(o_proj · fc2)를 0 으로 만들면 부품 출력이 0 이라 블록은 입력을 그대로 돌려줘야 한다
+    # 잔차 확인: 부품의 마지막 Linear(o_proj · down)를 0 으로 만들면 부품 출력이 0 이라 블록은 입력을 그대로 돌려줘야 한다
     zero_block = Block(config)
     with torch.no_grad():
-        for lin in (zero_block.attn.o_proj, zero_block.ffn.fc2):
+        for lin in (zero_block.attn.o_proj, zero_block.ffn.down):
             lin.weight.zero_()
             lin.bias.zero_()
     print(torch.allclose(zero_block(out), out))  # 기대: True
@@ -469,6 +480,14 @@ if __name__ == "__main__":
     # FFN 확인: 글자끼리 섞지 않는다 — 마지막 글자만 바꿔도 앞 글자들의 결과는 그대로
     ffn = FeedForward(config)
     print(torch.allclose(ffn(out)[:, :-1], ffn(out2)[:, :-1]))  # 기대: True
+
+    # 10단계 조각 5 확인: SwiGLU (문서 5-2 ~ 5-4)
+    sample = torch.tensor([2.0, -2.0, 0.0, -1.28, 5.0, -5.0])
+    print(silu(sample))  # 기대: [1.7616, -0.2384, 0.0000, -0.2785, 4.9665, -0.0335] — 큰 양수는 그대로 · 큰 음수는 0 근처 · 작은 음수는 조금 통과
+    print(torch.allclose(silu(out), F.silu(out)))  # 기대: True — 직접 짠 silu == 내장 F.silu
+    print(ffn.gate.out_features)  # 기대: 341 = int(4 x 128 x 2/3) · GPT-2 때 512
+    # 기대: 131754 = 문 · 내용 (128 x 341 + 341) x 2 + 접기 (341 x 128 + 128) · GPT-2 때 131712 (+42 — 거의 같음)
+    print(sum(p.numel() for p in ffn.parameters()))
 
     # 10단계 조각 3 확인: 직접 짠 RMSNorm 이 내장 nn.RMSNorm 과 같은 값을 내는가 (문서 3-4)
     mine = RMSNorm(config.n_embd)
