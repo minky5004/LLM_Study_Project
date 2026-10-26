@@ -5,6 +5,7 @@
 8단계 조각 4 에서 더한 것: 줄바꿈이 나오면 바로 멈추기 · 고정 시험 질문 exam() (8단계 문서 4-1 ~ 4-2).
 9단계 조각 7: 토크나이저가 BPE 1024 로 바뀜 — 고친 것은 except KeyError 두 곳을 지운 것뿐 (9단계 문서 7-6).
   줄 사이 `# 결과:` 중 글자 1244 · 11글자 같은 값은 8단계(글자 단위) 기록 · 9단계 값은 아래 직접 실행 블록의 기대값과 exam() 결과에.
+11단계 조각 1: 온도 — 점수를 온도로 나눈 뒤 확률로 바꿔 뽑기를 뾰족하게 · 고르게 조절한다 (11단계 문서 1-1 ~ 1-3).
 """
 
 from pathlib import Path
@@ -85,11 +86,14 @@ next_idx = torch.multinomial(probs, num_samples=1)
 # 조각 2 의 "점수 → 확률 → 뽑기" 를 max_new_tokens 번 되풀이하는 함수. 뽑을 때마다 입력 뒤에 붙인다 (문서 3-1).
 # 위 조각 2 는 한 걸음을 풀어서 보여 준 것이고, 아래 함수 안의 같은 줄들이 실제로 되풀이된다.
 @torch.no_grad()  # 점수만 재는 일이라 기록을 끈다 (조각 1 의 with torch.no_grad() 와 같은 일)
-def generate(model, idx, max_new_tokens, stop_idx=None):
+# 11단계 조각 1: temperature(온도) 인자를 더한다. 기본값은 "넣지 않으면 예전과 똑같이 도는 값" 이어야 한다 (11단계 문서 1-3).
+# 0 은 안 된다 — 0 으로 나누면 점수가 [inf, inf, nan] → 확률이 전부 nan → multinomial 이 RuntimeError (실행 확인).
+def generate(model, idx, max_new_tokens, stop_idx=None, temperature=1):
     """idx (1, T) 뒤에 토큰을 max_new_tokens 개 이어 붙여 (1, T + max_new_tokens) 를 돌려준다.
 
     stop_idx 를 주면 그 번호의 토큰이 뽑히는 순간 멈춘다 (8단계 문서 4-1) — 그 토큰까지 붙인 채로 돌려준다.
     주지 않으면(None) 예전처럼 늘 max_new_tokens 개를 만든다. 아래 확인용 출력의 (1, 51) · (1, 211) 은 이 경우다.
+    temperature 가 1 보다 작으면 1등 토큰에 더 몰리고, 크면 고르게 퍼진다 (11단계 문서 1-2). 0 은 0 으로 나누기라 쓰지 않는다.
     """
     for _ in range(max_new_tokens):
         # 모델은 block_size(128) 글자까지만 볼 수 있다 (문서 3-2). 모델에 줄 입력만 맨 끝 block_size 글자로 자른다.
@@ -99,6 +103,10 @@ def generate(model, idx, max_new_tokens, stop_idx=None):
 
         logits = model(idx_cond)  # (1, T') -> (1, T', 1024)  (T' = 잘린 뒤 길이, 최대 128)
         last = logits[:, -1, :]  # (1, T', 1024) -> (1, 1024)  마지막 자리 점수 (조각 2)
+        # 11단계 조각 1: 확률로 바꾸기 전에 점수를 온도로 나눈다 (11단계 문서 1-2 ②). 모양은 그대로 (1, 1024).
+        # 순서가 중요하다 — softmax 뒤의 확률을 나누면 합이 1 이 깨질 뿐 뾰족함은 안 바뀐다.
+        last = last / temperature
+        # 결과: 온도 1 이면 점수가 그대로라 exam() 답이 10단계 tying 시드 1 기록과 끝자리까지 같음 (배고파 → 아무래도 꼬렸나봐요.)
         probs = F.softmax(last, dim=-1)  # (1, 1024) 점수 -> 확률
         next_idx = torch.multinomial(probs, num_samples=1)  # (1, 1) 뽑힌 토큰 번호
 
@@ -120,8 +128,11 @@ def generate(model, idx, max_new_tokens, stop_idx=None):
 
 # ---- 조각 4: 대화해 보기 ----
 
-def reply(model, text, max_new_tokens=60):
-    """사용자가 한 말 text 에 모델이 봇으로서 답한 한 줄을 돌려준다. 예) "배고파" -> "아직 안 먹었어요"."""
+def reply(model, text, max_new_tokens=60, temperature=1.0):
+    """사용자가 한 말 text 에 모델이 봇으로서 답한 한 줄을 돌려준다. 예) "배고파" -> "아직 안 먹었어요".
+
+    temperature 는 generate 로 그대로 넘긴다 (11단계 조각 1).
+    """
     # 학습 데이터와 똑같은 모양의 시작 글을 만든다 (문서 4-1). 모양: "사용자: " + 말 + 줄바꿈 + "봇:"
     # 이 모양이어야 모델이 봇의 답을 이어 쓴다 (조각 1 의 prompt 와 같은 모양).
     prompt = f"사용자: {text}\n봇:"
@@ -132,7 +143,7 @@ def reply(model, text, max_new_tokens=60):
     # 8단계 조각 4: 줄바꿈이 뽑히면 바로 멈춘다 — 봇의 답은 한 줄이라 줄바꿈 = 답 끝 (8단계 문서 4-1).
     # encode("\n") 은 번호 하나짜리 리스트라 [0] 으로 첫 칸의 숫자를 꺼낸다. 리스트에는 .item() 이 없다 (AttributeError).
     # 9단계 BPE 에서도 이 줄은 그대로 — 줄바꿈 번호를 encode 로 구하니 토크나이저가 바뀌어도 맞는 번호가 나온다 (9단계 문서 7-6)
-    out = generate(model, idx, max_new_tokens, stop_idx=encode("\n")[0])
+    out = generate(model, idx, max_new_tokens, stop_idx=encode("\n")[0], temperature=temperature)
     # 결과 (8단계 · 글자 단위): encode("\n") = [0] → stop_idx = 0 (sorted 로 센 글자 목록에서 줄바꿈이 맨 앞)
     #       "배고파" 답에서 out.shape = torch.Size([1, 21]) — 예전엔 늘 (1, 71) · 끝 글자는 줄바꿈 "죠.\n"
     #       답 35개(질문 7개 × 5번) 6.32초 → 1.63초 · 답 평균 13.3글자 · 가장 긴 답 21글자
@@ -165,8 +176,11 @@ EXAM = {
 }
 
 
-def exam():
-    """EXAM 의 질문을 묶음마다 차례로 묻고 답을 출력한다. 같은 모델이면 실행할 때마다 같은 답이 나온다."""
+def exam(temperature=1.0):
+    """EXAM 의 질문을 묶음마다 차례로 묻고 답을 출력한다. 같은 모델 · 같은 온도면 실행할 때마다 같은 답이 나온다.
+
+    temperature 를 안 주면 1.0 — 9 · 10단계 결과와 같은 답이 나와야 한다 (11단계 문서 1-3 ②).
+    """
     # .items() 로 사전에서 (묶음 이름, 질문 리스트) 짝을 하나씩 꺼낸다
     for group, questions in EXAM.items():
         print(f"[{group}]")
@@ -175,7 +189,7 @@ def exam():
             # 질문마다 다시 거는 이유: 앞 질문의 답 길이에 따라 다음 질문의 뽑기가 달라지지 않게.
             torch.manual_seed(0)
             # 9단계 조각 7: 바이트 기준 BPE 라 encode 가 KeyError 로 거부하는 글자가 없다 — 8단계의 except KeyError 는 지움 (9단계 문서 7-6 ④)
-            print(f"  {q} → {reply(model, q)}")
+            print(f"  {q} → {reply(model, q, temperature=temperature)}")
 # ---- exam() 결과 (8단계 조각 4 · 6층 · 256칸 · 검증 1.64 모델) — 두 번 돌려 두 번 다 같은 답 ----
 # [배운 질문]   배고파 → 울는 게 낫죠. · 안녕하세요 → 연애네요. · 심심해 → 연락하면 자꾸 더 좋겠네요.
 #               (train.txt 의 답: 얼른 맛난 음식 드세요. / 안녕하세요. / 친구들과 연락해보세요. — 외워 내지 않음)
@@ -220,4 +234,18 @@ if __name__ == "__main__":
     print(repr(a))  # 기대: 줄바꿈 없는 짧은 한 줄, 예) '아직 안 먹었어요' (뽑기라 실행마다 다를 수 있다)
     print("\n" in a)  # 기대: False — 답이 한 줄로 끊겼는지
     exam()  # 기대: 묶음 셋의 질문과 답 — 다시 돌려도 같은 답 · 9단계부터 모르는 글자 묶음도 답한다 (결과는 exam() 아래)
+
+    # 11단계 조각 1: 온도마다 "배고파" 시작 글 뒤 첫 토큰의 상위 3개 확률 (11단계 문서 1-2)
+    # last 는 조각 2 에서 꺼낸 마지막 자리 점수 (1, 1024). topk 는 큰 것부터 k 개의 (값, 번호) 를 돌려준다.
+    for t in (0.5, 1.0, 2.0):
+        top = F.softmax(last / t, dim=-1).topk(3)
+        pairs = [f"{decode([i])!r} {p:.2f}" for p, i in zip(top.values[0].tolist(), top.indices[0].tolist())]
+        print(f"온도 {t}: {' · '.join(pairs)}")  # 기대: 온도가 작을수록 1등 확률이 커지고, 1등 순서는 셋 다 같다
+    # 결과 (10단계 tying 시드 1 모델):
+    #   온도 0.5: ' �' 0.15 · ' 맛' 0.10 · ' �' 0.06
+    #   온도 1.0: ' �' 0.03 · ' 맛' 0.03 · ' �' 0.02
+    #   온도 2.0: ' �' 0.01 · ' 맛' 0.01 · ' �' 0.01
+    #   1등 순서 그대로 · 1등 확률 0.03 → 0.15 (5배) — 온도 1 에선 1등도 3% 라 1024개에 아주 넓게 퍼져 있음
+    #   ' �' 는 한글 한 글자의 바이트 일부만 든 토큰이라 혼자 decode 하면 깨져 보임 (뒤 토큰과 이어져야 글자가 됨)
+
     chat()  # 직접 말해 보기 — 그냥 엔터를 치면 끝
