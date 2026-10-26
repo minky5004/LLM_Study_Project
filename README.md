@@ -1,5 +1,7 @@
 # LLM_Study_Project
 
+📎 [Notion 정리](https://app.notion.com/p/4057b7516d7c8195a09ce823f73397ab)
+
 > 토크나이저부터 학습 루프까지 밑바닥 구현 · 한국어 대화 모델(파라미터 500만) 공부 기록
 
 GPT-2식 구조에서 출발 · 요즘 LLM 부품(RMSNorm · RoPE · SwiGLU · SDPA · weight tying) 한 번에 하나씩 교체 · 교체마다 시드 3개로 비교. [guppylm](https://github.com/arman-bd/guppylm) 참고
