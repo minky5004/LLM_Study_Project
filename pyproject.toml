@@ -58,6 +58,8 @@ explicit = true
 # uv run · uv sync 는 dev 묶음도 기본으로 설치한다 (빼려면 --no-dev)
 [dependency-groups]
 dev = [
+    # 그래프 라이브러리 — 학습 로그로 그림을 그리는 llm/plot_logs.py 에서만 쓴다
+    "matplotlib>=3.11",
     # 허깅페이스 토크나이저 라이브러리 — 직접 짠 BPE 와 견주는 llm/compare_tokenizers.py 에서만 쓴다.
     # 토크나이저는 직접 구현이 이 프로젝트의 목적이라 학습 코드는 이것을 쓰지 않는다
     "tokenizers>=0.23.3",
