@@ -4,8 +4,8 @@
   학습 시간 · 검증용 글자당 토큰 수 · 왕복(decode(encode(글)) == 글) · 두 표에 겹친 조각 수
 그리고 같은 문장을 둘이 어떻게 자르는지 나란히 본다.
 
-실행: uv run --with tokenizers python -m llm.compare_tokenizers
-  --with 는 이 실행 한 번에만 라이브러리를 빌려 쓴다 — pyproject.toml 은 안 바뀐다 (비교에만 쓰고 의존성에는 안 넣음)
+실행: uv run python -m llm.compare_tokenizers
+  tokenizers 는 pyproject.toml 의 dev 묶음(개발할 때만 쓰는 라이브러리)에 있다 — 학습 · 생성 코드는 쓰지 않는다
   우리 BPE 를 1024 까지 새로 학습하느라 몇 분 걸린다 (합치기 표 파일을 불러 쓰지 않고 시간을 재려고 다시 배운다)
 """
 
@@ -103,7 +103,7 @@ if __name__ == "__main__":
         print("  우리      ", show(ours_pieces))
         print("  라이브러리", show(hf_pieces))
 
-# ---- 직접 실행 결과 (uv run --with tokenizers python -m llm.compare_tokenizers · tokenizers 0.23.3 · 약 2분) ----
+# ---- 직접 실행 결과 (uv run python -m llm.compare_tokenizers · tokenizers 0.23.3 · 약 2분) ----
 # 학습 시간    우리 113.1초 · 라이브러리 0.40초
 # 글자당 토큰  우리 0.7434 · 라이브러리 0.7434
 # 왕복         우리 True · 라이브러리 True
