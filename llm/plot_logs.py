@@ -24,7 +24,7 @@ OUT_DIR = Path("docs/images")
 
 # 실험 순서 · 그림에 쓸 이름. 로그의 label 이 키 — 10단계는 바로 앞 모델 위에 하나씩 쌓은 누적 교체
 STAGES = [
-    ("char", "글자 단위"),
+    ("char", "Char-level"),
     ("bpe1024", "BPE 1024"),
     ("rmsnorm", "RMSNorm"),
     ("rope", "RoPE"),
@@ -39,8 +39,7 @@ BEFORE, AFTER = "#2a78d6", "#eb6834"
 INK, INK2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 
 plt.rcParams.update({
-    "font.family": "Malgun Gothic",  # 한글 라벨 — Windows 기본 글꼴
-    "axes.unicode_minus": False,  # 이 글꼴엔 수학 빼기 기호가 없어 - 로 그린다
+    # 라벨은 영어 — matplotlib 기본 글꼴(DejaVu Sans) 그대로 · 어느 PC 에서 다시 그려도 같은 모양
     "figure.facecolor": SURFACE,
     "axes.facecolor": SURFACE,
     "axes.edgecolor": GRID,
@@ -105,15 +104,15 @@ def plot_compare(logs, before, after, path):
         for ax, rows in ((left, vals), (right, gaps)):
             mean, lo, hi = seed_band([r[1:] for r in rows])
             ax.fill_between(s, lo, hi, color=color, alpha=0.18, linewidth=0)
-            ax.plot(s, mean, color=color, label=f"{NAMES[label]} — 최저 {best:.4f}")
+            ax.plot(s, mean, color=color, label=f"{NAMES[label]} — best {best:.4f}")
         # 평균 곡선이 가장 낮은 걸음에 점 — 언제 최저에 닿는지 보이게
         mean = seed_band([r[1:] for r in vals])[0]
         i = mean.argmin()
         left.plot(s[i], mean[i], "o", color=color, markersize=8, markeredgecolor=SURFACE, markeredgewidth=2)
-    left.set_title("검증 손실 (글자당 · 낮을수록 좋음)", color=INK, fontsize=11, loc="left")
-    right.set_title("외운 정도 (검증 - 학습 · 클수록 외움)", color=INK, fontsize=11, loc="left")
+    left.set_title("Validation loss (per char, lower is better)", color=INK, fontsize=11, loc="left")
+    right.set_title("Overfitting gap (val − train, higher = more memorized)", color=INK, fontsize=11, loc="left")
     for ax in (left, right):
-        ax.set_xlabel("학습 걸음")
+        ax.set_xlabel("Training step")
     left.legend(frameon=False, fontsize=9, labelcolor=INK)
     fig.suptitle(f"{NAMES[before]} → {NAMES[after]}", color=INK, fontsize=13, x=0.01, ha="left")
     fig.tight_layout()
@@ -139,11 +138,11 @@ def plot_journey(logs, path):
         prev = m
     ax.plot(xs, means, color=GRID, linewidth=1.5, zorder=1)  # 흐름만 보이게 옅은 선
     ax.set_xticks(list(xs), [name for _, name in STAGES])
-    ax.set_ylabel("검증 최저 손실 (글자당)")
+    ax.set_ylabel("Best validation loss (per char)")
     lo = min(min(log["best_val_per_char"] for log in logs[l].values()) for l, _ in STAGES)
     hi = max(max(log["best_val_per_char"] for log in logs[l].values()) for l, _ in STAGES)
     ax.set_ylim(lo - 0.01, hi + 0.025)  # 위쪽은 값 글자 자리
-    ax.set_title("단계별 검증 최저 손실 — 점 = 시드 3개 평균 · 막대 = 시드 범위 · % = 바로 앞 단계 대비",
+    ax.set_title("Best validation loss by stage — dot = mean of 3 seeds · bar = seed range · % = vs previous stage",
                  color=INK, fontsize=11, loc="left")
     fig.tight_layout()
     fig.savefig(path, dpi=150)
@@ -155,20 +154,20 @@ def plot_speed(logs, path):
     before = [log["seconds"] for log in logs["swiglu-retime"].values()]
     after = [log["seconds"] for log in logs["sdpa"].values()]
     fig, ax = plt.subplots(figsize=(6, 3.2))
-    for y, (name, secs, color) in enumerate((("SwiGLU (직접 짠 attention)", before, BEFORE),
-                                             ("SDPA (내장 attention)", after, AFTER))):
+    for y, (name, secs, color) in enumerate((("SwiGLU (manual attention)", before, BEFORE),
+                                             ("SDPA (built-in attention)", after, AFTER))):
         m = np.mean(secs)
         ax.barh(y, m, height=0.45, color=color)
         if len(secs) > 1:  # 시드가 여럿이면 범위 막대
             ax.hlines(y, min(secs), max(secs), color=INK2, linewidth=1.5)
-        ax.annotate(f"{m:.1f}초" + (f" (시드 {len(secs)}개 평균)" if len(secs) > 1 else " (1번)"),
+        ax.annotate(f"{m:.1f}s" + (f" (mean of {len(secs)} seeds)" if len(secs) > 1 else " (1 run)"),
                     (max(secs), y), xytext=(10, 0), textcoords="offset points", va="center", color=INK, fontsize=9)
-    ax.set_yticks([0, 1], ["SwiGLU\n(직접 짠 attention)", "SDPA\n(내장 attention)"])
+    ax.set_yticks([0, 1], ["SwiGLU\n(manual attention)", "SDPA\n(built-in attention)"])
     ax.invert_yaxis()
-    ax.set_xlim(0, max(before + after) * 1.35)
-    ax.set_xlabel("학습 루프 시간 (초 · 5000걸음)")
+    ax.set_xlim(0, max(before + after) * 1.5)
+    ax.set_xlabel("Training loop time (s, 5000 steps)")
     ax.grid(axis="y", visible=False)
-    ax.set_title("SDPA 교체 전후 학습 시간", color=INK, fontsize=11, loc="left")
+    ax.set_title("Training time before / after SDPA", color=INK, fontsize=11, loc="left")
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -181,11 +180,12 @@ def plot_vocab(path):
         cells = [c.strip() for c in line.split("|")]
         # 표 줄만: 이름 | vocab | 학습용 토큰 | 글자당 | 드문 번호 | 파라미터 — 첫 칸이 글자 · BPE 인 줄
         if len(cells) == 6 and cells[0] in ("글자", "BPE"):
-            rows.append((f"{cells[0]} {cells[1]}", float(cells[3]), int(cells[4])))
+            name = "Char" if cells[0] == "글자" else cells[0]  # 결과 파일의 "글자" 는 그림에선 영어로
+            rows.append((f"{name} {cells[1]}", float(cells[3]), int(cells[4])))
     names = [r[0] for r in rows]
     fig, (a, b) = plt.subplots(1, 2, figsize=(10, 3.4))
-    for ax, k, title in ((a, 2, "드문 번호 수 (학습 글에 10번 미만 · 적을수록 좋음)"),
-                         (b, 1, "글자당 토큰 수 (작을수록 글이 짧아짐)")):
+    for ax, k, title in ((a, 2, "Rare tokens (< 10 times in training text, lower is better)"),
+                         (b, 1, "Tokens per char (lower = shorter sequences)")):
         vals = [r[k] for r in rows]
         colors = [AFTER if n == "BPE 1024" else BEFORE for n in names]  # 고른 크기만 주황
         ax.bar(names, vals, width=0.5, color=colors)
@@ -195,7 +195,7 @@ def plot_vocab(path):
         ax.set_title(title, color=INK, fontsize=11, loc="left")
         ax.grid(axis="x", visible=False)
         ax.set_ylim(0, max(vals) * 1.15)
-    fig.suptitle("vocab_size 고르기 — 주황 = 고른 크기 1024", color=INK, fontsize=13, x=0.01, ha="left")
+    fig.suptitle("Choosing vocab_size — orange = chosen size 1024", color=INK, fontsize=13, x=0.01, ha="left")
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
