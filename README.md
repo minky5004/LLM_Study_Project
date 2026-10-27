@@ -1,6 +1,6 @@
 # LLM_Study_Project
 
-📎 [Notion 정리](https://app.notion.com/p/4057b7516d7c8195a09ce823f73397ab)
+📎 [Notion 정리](https://app.notion.com/p/4057b7516d7c8195a09ce823f73397ab) · [비전공자용 전체 지도](docs/overview.html) — HTML 한 장 · 내려받아 브라우저로
 
 > 토크나이저부터 학습 루프까지 밑바닥 구현 · 한국어 대화 모델(파라미터 500만) 공부 기록
 
@@ -72,7 +72,9 @@ PyPI 의 Windows torch 는 CPU 전용 — `pyproject.toml` 에서 PyTorch 인덱
 ```
 LLM_Study_Project/
 ├── data/make_dataset.py        대화 데이터 내려받기 · 섞기 · 질문 단위 학습 / 검증 분리
-├── docs/images/                학습 로그에서 그린 그래프
+├── docs/
+│   ├── overview.html           데이터부터 대화까지 일곱 단계 · 파일 지도 · 낱말 풀이 — 비전공자용
+│   └── images/                 학습 로그에서 그린 그래프
 └── llm/
     ├── config.py               모델 · 학습 설정값
     ├── char_tokenizer.py       글자 단위 토크나이저 (BPE 이전 · 비교용)
